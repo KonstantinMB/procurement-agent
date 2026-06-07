@@ -99,6 +99,9 @@ export type AgentEvent =
   | { type: "agent.message"; text: string } // finalized assistant message
   | { type: "status"; phase: string; message?: string }
   | { type: "done"; ok: boolean }
+  | { type: "run.reset" } // global clear-all: wipe every run (dashboard reset)
+  | { type: "run.created"; request: RfqRequest; createdAt: number; running: boolean }
+  | { type: "run.removed" } // remove just this run (runId on the envelope)
   // tool activity (drives the activity panel + swarm)
   | {
       type: "tool.call";
@@ -162,3 +165,26 @@ export type AgentEventType = AgentEvent["type"];
 
 /** Narrow helper: pick the event object for a given type. */
 export type EventOf<T extends AgentEventType> = Extract<AgentEvent, { type: T }>;
+
+/**
+ * What actually travels over SSE: any AgentEvent tagged with the run it belongs
+ * to. The bus stamps `runId` at emit time (see bus.ts); the client routes each
+ * event into that run's slice. A few truly global events (the initial connection
+ * status, the global run.reset) arrive with no runId.
+ */
+export type WireEvent = AgentEvent & { runId?: string };
+
+/** Snapshot of a run used by the RFQ list page. */
+export interface RunSummary {
+  runId: string;
+  title: string;
+  createdAt: number;
+  status: "researching" | "calling" | "quoted" | "ordered" | "done";
+  request?: RfqRequest;
+  suppliers: number;
+  bestPrice?: number;
+  savings?: number;
+  currency: string;
+  withinBudget?: boolean;
+  ordered: boolean;
+}

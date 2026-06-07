@@ -94,6 +94,9 @@ export type AgentEvent =
   | { type: "agent.message"; text: string }
   | { type: "status"; phase: string; message?: string }
   | { type: "done"; ok: boolean }
+  | { type: "run.reset" } // global clear-all: wipe every run (dashboard reset)
+  | { type: "run.created"; request: RfqRequest; createdAt: number; running: boolean }
+  | { type: "run.removed" } // remove just this run (runId on the envelope)
   | {
       type: "tool.call";
       id: string;
@@ -149,3 +152,25 @@ export type AgentEvent =
 
 export type AgentEventType = AgentEvent["type"];
 export type EventOf<T extends AgentEventType> = Extract<AgentEvent, { type: T }>;
+
+/**
+ * What actually arrives over SSE: any AgentEvent tagged with the run it belongs
+ * to. The server stamps `runId` at emit time; the client routes each event into
+ * `runs[runId]`. A few global events (initial connection status, run.reset)
+ * arrive with no runId.
+ */
+export type WireEvent = AgentEvent & { runId?: string };
+
+export interface RunSummary {
+  runId: string;
+  title: string;
+  createdAt: number;
+  status: "researching" | "calling" | "quoted" | "ordered" | "done";
+  request?: RfqRequest;
+  suppliers: number;
+  bestPrice?: number;
+  savings?: number;
+  currency: string;
+  withinBudget?: boolean;
+  ordered: boolean;
+}

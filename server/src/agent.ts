@@ -1,83 +1,85 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { bus } from "./bus";
-import { rfq } from "./state";
-import { appServer } from "./tools";
+import { createAppServer } from "./tools";
 import { SUBAGENTS } from "./subagents";
 import { SYSTEM_PROMPT } from "./prompts";
-import type { AskQuestion, ToolKind } from "./events";
+import { createRun, getRun, type RunContext } from "./runs";
+import { makeMockSupplier } from "./mock-supplier";
+import type { AgentEvent, AskQuestion, ToolKind } from "./events";
 
-// ─── streaming-input inbox (keeps one long-running session open) ───────────
-let queue: any[] = [];
-let wake: (() => void) | null = null;
-let closed = false;
-let started = false;
-
-function enqueue(text: string): void {
-  queue.push({
-    type: "user",
-    message: { role: "user", content: text },
-    parent_tool_use_id: null,
-  });
-  wake?.();
-}
-
-async function* inbox(): AsyncGenerator<any> {
-  while (!closed) {
-    if (queue.length) {
-      yield queue.shift()!;
-      continue;
-    }
-    await new Promise<void>((r) => (wake = r));
-    wake = null;
-  }
-}
-
-// ─── pending AskUserQuestion resolvers ────────────────────────────────────
-const pendingQuestions = new Map<string, (answers: Record<string, string>) => void>();
+// ─── pending AskUserQuestion resolvers ─────────────────────────────────────
+// Keyed by question id (globally unique). Each carries the emit of the run that
+// asked, so the answer routes back to the right card.
+const pendingQuestions = new Map<
+  string,
+  { resolve: (answers: Record<string, string>) => void; emit: (e: AgentEvent) => void }
+>();
 let qCounter = 0;
 
-export function answerQuestion(id: string, answers: Record<string, string>): void {
-  const r = pendingQuestions.get(id);
-  if (r) {
+/**
+ * Resolve a pending AskUserQuestion. `runId` is part of the public contract
+ * (index.ts passes it through from /api/answer), but routing is driven by the
+ * globally-unique question id and the run-bound emit captured when the question
+ * was asked, so the answer always lands on the right run's card.
+ */
+export function answerQuestion(runId: string, id: string, answers: Record<string, string>): void {
+  const q = pendingQuestions.get(id);
+  if (q) {
     pendingQuestions.delete(id);
-    r(answers);
-  }
-  bus.emit({ type: "question.answered", id, answers });
-}
-
-export function pushUserMessage(text: string): void {
-  enqueue(text);
-}
-
-export function runAgent(text: string): void {
-  rfq.reset();
-  enqueue(text);
-  if (!started) {
-    started = true;
-    void startLoop();
+    q.resolve(answers);
+    q.emit({ type: "question.answered", id, answers });
   }
 }
 
-async function canUseTool(toolName: string, input: any): Promise<any> {
-  if (toolName === "AskUserQuestion") {
-    const questions = (input?.questions ?? []) as AskQuestion[];
-    const id = "q-" + ++qCounter;
-    bus.emit({ type: "question.ask", id, questions });
-    const answers = await new Promise<Record<string, string>>((resolve) => {
-      pendingQuestions.set(id, resolve);
-      setTimeout(() => {
-        if (pendingQuestions.has(id)) {
-          pendingQuestions.delete(id);
-          resolve({});
-        }
-      }, 300000);
-    });
-    return { behavior: "allow", updatedInput: { ...input, answers } };
-  }
-  return { behavior: "allow", updatedInput: input };
+function userMsg(text: string): any {
+  return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null };
 }
 
-const agentCallIds = new Set<string>();
+/** Mid-run chat follow-up → inject into a specific run's live query. */
+export function pushUserMessage(runId: string, text: string): void {
+  getRun(runId)?.pushUserMessage?.(text);
+}
+
+/**
+ * Start a brand-new PARALLEL run and return its id. Each run is fully
+ * independent: its own RfqState, AbortController, MCP tool server, and
+ * runId-stamped event stream. Starting a run never touches the others.
+ */
+export function runAgent(text: string): string {
+  const ctx = createRun();
+  ctx.state.setRequest({ raw: text });
+  ctx.emit({ type: "run.created", request: { raw: text }, createdAt: ctx.createdAt, running: true });
+  ctx.emit({ type: "rfq.request", request: { raw: text } });
+  // Seed the one controlled supplier we actually negotiate against (phone + email)
+  // so the hero call always has a safe target — Procura never cold-contacts a real
+  // sourced business. The web-discovered suppliers set the price baseline; this one
+  // is the live-negotiation target. See mock-supplier.ts / voice.ts / email.ts.
+  const mock = makeMockSupplier();
+  ctx.state.upsertVendor(mock);
+  ctx.emit({ type: "rfq.supplier_added", vendor: mock });
+  void startRun(ctx, text);
+  return ctx.id;
+}
+
+function canUseToolFor(ctx: RunContext) {
+  return async (toolName: string, input: any): Promise<any> => {
+    if (toolName === "AskUserQuestion") {
+      const questions = (input?.questions ?? []) as AskQuestion[];
+      const id = "q-" + ++qCounter;
+      ctx.emit({ type: "question.ask", id, questions });
+      const answers = await new Promise<Record<string, string>>((resolve) => {
+        pendingQuestions.set(id, { resolve, emit: ctx.emit });
+        setTimeout(() => {
+          if (pendingQuestions.has(id)) {
+            pendingQuestions.delete(id);
+            resolve({});
+          }
+        }, 300000);
+      });
+      return { behavior: "allow", updatedInput: { ...input, answers } };
+    }
+    return { behavior: "allow", updatedInput: input };
+  };
+}
 
 function kindFor(name: string): ToolKind {
   if (name.includes("call_supplier")) return "call";
@@ -128,11 +130,12 @@ function summarise(content: any): string | undefined {
   return undefined;
 }
 
-function handleMessage(m: any): void {
+function handleMessage(ctx: RunContext, agentCallIds: Set<string>, m: any): void {
+  const emit = ctx.emit;
   switch (m?.type) {
     case "system":
       if (m.subtype === "init")
-        bus.emit({
+        emit({
           type: "agent.ready",
           model: m.model ?? "claude-opus-4-8",
           apiKeySource: m.apiKeySource,
@@ -142,7 +145,7 @@ function handleMessage(m: any): void {
     case "stream_event": {
       const ev = m.event;
       if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta")
-        bus.emit({
+        emit({
           type: "agent.text_delta",
           text: ev.delta.text,
           subagentId: m.parent_tool_use_id ?? undefined,
@@ -156,13 +159,13 @@ function handleMessage(m: any): void {
         if (block.type === "tool_use") {
           if (block.name === "Agent") {
             agentCallIds.add(block.id);
-            bus.emit({
+            emit({
               type: "subagent.spawned",
               id: block.id,
               role: block.input?.subagent_type ?? "supplier-scout",
             });
           }
-          bus.emit({
+          emit({
             type: "tool.call",
             id: block.id,
             name: block.name,
@@ -184,9 +187,9 @@ function handleMessage(m: any): void {
             const id = block.tool_use_id;
             if (agentCallIds.has(id)) {
               agentCallIds.delete(id);
-              bus.emit({ type: "subagent.done", id });
+              emit({ type: "subagent.done", id });
             }
-            bus.emit({
+            emit({
               type: "tool.result",
               id,
               status: block.is_error ? "error" : "done",
@@ -198,15 +201,36 @@ function handleMessage(m: any): void {
     }
 
     case "result":
-      bus.emit({ type: "agent.thinking", active: false });
-      if (m.subtype === "success" && m.result)
-        bus.emit({ type: "agent.message", text: m.result });
-      bus.emit({ type: "done", ok: m.subtype === "success" });
+      emit({ type: "agent.thinking", active: false });
+      if (m.subtype === "success" && m.result) emit({ type: "agent.message", text: m.result });
+      emit({ type: "done", ok: m.subtype === "success" });
       break;
   }
 }
 
-async function startLoop(): Promise<void> {
+async function startRun(ctx: RunContext, text: string): Promise<void> {
+  const abort = ctx.abort;
+  const agentCallIds = new Set<string>();
+
+  // Per-run streaming inbox (lets chat follow-ups reach this run mid-flight).
+  let queue: any[] = [userMsg(text)];
+  let wake: (() => void) | null = null;
+  let closed = false;
+  ctx.pushUserMessage = (t: string) => {
+    queue.push(userMsg(t));
+    wake?.();
+  };
+  async function* inbox(): AsyncGenerator<any> {
+    while (!closed) {
+      if (queue.length) {
+        yield queue.shift()!;
+        continue;
+      }
+      await new Promise<void>((r) => (wake = r));
+      wake = null;
+    }
+  }
+
   const options: any = {
     model: "claude-opus-4-8",
     effort: "max",
@@ -214,7 +238,7 @@ async function startLoop(): Promise<void> {
     includePartialMessages: true,
     settingSources: [],
     systemPrompt: SYSTEM_PROMPT,
-    mcpServers: { app: appServer },
+    mcpServers: { app: createAppServer(ctx) },
     allowedTools: [
       "mcp__app__set_request",
       "mcp__app__research_suppliers",
@@ -229,16 +253,29 @@ async function startLoop(): Promise<void> {
       "AskUserQuestion",
     ],
     agents: SUBAGENTS,
-    canUseTool,
+    canUseTool: canUseToolFor(ctx),
     maxTurns: 80,
+    abortController: abort,
   };
 
-  bus.emit({ type: "agent.thinking", active: true });
+  ctx.emit({ type: "agent.thinking", active: true });
   try {
     const q = query({ prompt: inbox() as any, options });
-    for await (const m of q as any) handleMessage(m);
+    for await (const m of q as any) {
+      if (abort.signal.aborted) break;
+      handleMessage(ctx, agentCallIds, m);
+    }
   } catch (err) {
-    bus.emit({ type: "status", phase: "error", message: String(err) });
-    bus.emit({ type: "done", ok: false });
+    if (!abort.signal.aborted) {
+      ctx.emit({ type: "status", phase: "error", message: String(err) });
+      ctx.emit({ type: "done", ok: false });
+    }
+  } finally {
+    closed = true;
+    // Cast: the assignment lives in the nested generator, so TS narrows the
+    // local to `null` here. Wake the inbox so it observes closed=true and exits.
+    (wake as (() => void) | null)?.();
+    ctx.running = false;
+    ctx.pushUserMessage = null;
   }
 }

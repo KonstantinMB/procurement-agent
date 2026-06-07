@@ -14,17 +14,21 @@ export default function ActivityPanel() {
   const ordered = [...toolOrder].reverse();
 
   return (
-    <aside className="bg-surface border-l border-border h-full flex flex-col min-h-0">
-      <header className="p-3 border-b border-border flex items-center gap-2">
-        <span className="eyebrow">LIVE ACTIVITY</span>
-        {running && (
+    <section className="bg-surface h-full flex flex-col min-h-0">
+      <header className="px-3 py-2 border-b border-border flex items-center gap-2">
+        {running ? (
           <motion.span
             aria-hidden
             className="h-1.5 w-1.5 rounded-full bg-brand"
             animate={{ opacity: [1, 0.3, 1], scale: [1, 0.85, 1] }}
             transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
           />
+        ) : (
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-faint" />
         )}
+        <span className="text-xs text-muted">
+          {running ? "Streaming" : "Idle"}
+        </span>
         {workerCount > 0 && (
           <span className="ml-auto text-faint text-xs tnum">
             {workerCount} {workerCount === 1 ? "worker" : "workers"}
@@ -55,6 +59,6 @@ export default function ActivityPanel() {
           ))}
         </AnimatePresence>
       </div>
-    </aside>
+    </section>
   );
 }

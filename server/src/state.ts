@@ -1,16 +1,43 @@
 import type { Invoice, RfqRequest, Vendor } from "./events";
 
 /**
- * Server-side mirror of the RFQ so endpoints can compute the winner, savings,
- * and the final invoice. The browser holds the authoritative UI state; this is
- * just enough for order/summary logic.
+ * Stable slug for vendor ids: lowercase, non-alphanumeric runs → "-", trimmed.
+ * The SINGLE source of truth for ids — both id minting (add_supplier) and id
+ * resolution (resolve) must go through this, or a row keyed one way won't be
+ * found when looked up the other.
  */
-class RfqState {
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Server-side mirror of ONE run's RFQ so endpoints can compute the winner,
+ * savings, and the final invoice. One instance per run (see runs.ts). The
+ * browser holds the authoritative UI state; this is just enough for
+ * order/summary logic.
+ */
+export class RfqState {
+  readonly runId: string;
+  readonly createdAt: number;
+  title: string;
   request: RfqRequest | undefined;
   vendors = new Map<string, Vendor>();
+  ordered: { vendorId: string; invoice: Invoice } | undefined;
+  done = false;
+
+  constructor(runId = "", title = "New RFQ") {
+    this.runId = runId;
+    this.createdAt = Date.now();
+    this.title = title;
+  }
 
   setRequest(r: RfqRequest): void {
     this.request = r;
+    if (r.item) this.title = r.item;
+    else if (r.raw) this.title = r.raw.slice(0, 80);
   }
   upsertVendor(v: Vendor): void {
     this.vendors.set(v.id, v);
@@ -22,19 +49,33 @@ class RfqState {
   get(id: string): Vendor | undefined {
     return this.vendors.get(id);
   }
+  /**
+   * Resolve the vendor an agent is referring to. The model routinely passes a
+   * human name ("Siboni S.r.l.") or a guessed slug where the canonical id is
+   * expected; try the exact id, then the slugified string, then a
+   * case-insensitive name match. Returns undefined only when truly unknown.
+   * This is what stops a call/quote from silently missing its row.
+   */
+  resolve(idOrName: string): Vendor | undefined {
+    if (!idOrName) return undefined;
+    const direct = this.vendors.get(idOrName);
+    if (direct) return direct;
+    const bySlug = this.vendors.get(slugify(idOrName));
+    if (bySlug) return bySlug;
+    const lower = idOrName.trim().toLowerCase();
+    for (const v of this.vendors.values()) {
+      if (v.name.toLowerCase() === lower) return v;
+    }
+    return undefined;
+  }
   all(): Vendor[] {
     return [...this.vendors.values()];
-  }
-  reset(): void {
-    this.request = undefined;
-    this.vendors.clear();
   }
 
   private priceOf(v: Vendor): number | undefined {
     return v.negotiatedPrice ?? v.initialPrice;
   }
 
-  /** Cheapest vendor that still meets the deadline (falls back to cheapest). */
   bestVendor(): Vendor | undefined {
     const priced = this.all().filter((v) => this.priceOf(v) != null);
     const onTime = priced
@@ -59,7 +100,7 @@ class RfqState {
   }
 
   makeInvoice(vendorId?: string): Invoice | undefined {
-    const v = vendorId ? this.get(vendorId) : this.bestVendor();
+    const v = vendorId ? this.resolve(vendorId) : this.bestVendor();
     if (!v) return undefined;
     const unit = v.negotiatedPrice ?? v.initialPrice ?? 0;
     const qty = this.request?.quantity ?? 1;
@@ -75,6 +116,14 @@ class RfqState {
       date: new Date().toISOString(),
     };
   }
-}
 
-export const rfq = new RfqState();
+  /** Coarse status used by the RFQ list page. */
+  derivedStatus(): "researching" | "calling" | "quoted" | "ordered" | "done" {
+    if (this.ordered) return "ordered";
+    const list = this.all();
+    if (list.some((v) => v.status === "calling" || v.status === "negotiating")) return "calling";
+    if (list.some((v) => v.status === "won" || v.status === "quoted")) return "quoted";
+    if (this.done) return "done";
+    return "researching";
+  }
+}
