@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
 import type {
   AgentEvent,
   AskQuestion,
@@ -84,13 +83,11 @@ interface AppState {
 
   call: CallState;
   chat: ChatMessage[];
-  chatSplit: number; // fraction of rail height given to the chat panel (0.2–0.8)
+  question: { id: string; questions: AskQuestion[] } | null;
   order?: { placed: boolean; invoice?: Invoice };
 
   applyEvents: (events: AgentEvent[]) => void;
   pushChat: (role: "user" | "agent", text: string) => void;
-  submitAnswer: (qid: string, answers: Record<string, string>) => void;
-  setChatSplit: (frac: number) => void;
   setConnected: (c: boolean) => void;
   reset: () => void;
 }
@@ -133,15 +130,16 @@ export const useStore = create<AppState>()((set) => ({
       call: initialCall,
       question: null,
       order: undefined,
+      chat: [],
     }),
 
   applyEvents: (events) =>
     set((s) => {
-      const toolCalls = { ...s.toolCalls };
+      let toolCalls = { ...s.toolCalls };
       let toolOrder = s.toolOrder;
-      const subagents = { ...s.subagents };
+      let subagents = { ...s.subagents };
       let subagentOrder = s.subagentOrder;
-      const vendors = { ...s.vendors };
+      let vendors = { ...s.vendors };
       let vendorOrder = s.vendorOrder;
       let call = s.call;
       let chat = s.chat;
@@ -149,6 +147,26 @@ export const useStore = create<AppState>()((set) => ({
 
       for (const e of events) {
         switch (e.type) {
+          case "run.reset":
+            // Server-driven clean slate at the start of any run (demo, command,
+            // or /api/reset) — works even for the curl path with no client reset.
+            // Chat is intentionally preserved here so an optimistic user message
+            // isn't wiped by the async reset; client reset() clears the thread.
+            toolCalls = {};
+            toolOrder = [];
+            subagents = {};
+            subagentOrder = [];
+            vendors = {};
+            vendorOrder = [];
+            call = initialCall;
+            patch.running = false;
+            patch.thinking = false;
+            patch.request = undefined;
+            patch.status = undefined;
+            patch.summary = undefined;
+            patch.question = null;
+            patch.order = undefined;
+            break;
           case "agent.ready":
             patch.model = e.model;
             patch.apiKeySource = e.apiKeySource;
@@ -170,6 +188,10 @@ export const useStore = create<AppState>()((set) => ({
             break;
 
           case "tool.call":
+            // set_request only updates the request header (rendered from
+            // rfq.request), so a tool card for it is redundant noise — keep it
+            // out of the live activity feed.
+            if (e.name === "mcp__app__set_request") break;
             toolCalls[e.id] = {
               id: e.id,
               name: e.name,

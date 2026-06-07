@@ -108,11 +108,24 @@ const CALL_SCRIPT: { speaker: "agent" | "supplier"; text: string }[] = [
  * Run the full scripted demo. Returns immediately; the story unfolds over
  * timers driven by a cumulative scheduler.
  */
+let demoTimers: ReturnType<typeof setTimeout>[] = [];
+
+/** Cancel any pending demo timers — aborts an in-flight scripted run. */
+export function stopDemo(): void {
+  for (const id of demoTimers) clearTimeout(id);
+  demoTimers = [];
+}
+
 export function runDemo(): void {
+  // Cancel any still-pending timers from a prior run so re-triggering the demo
+  // never stacks two interleaved timelines, then wipe the client projection.
+  stopDemo();
+  bus.emit({ type: "run.reset" });
+
   let t = 0;
   const at = (ms: number, fn: () => void): void => {
     t += ms;
-    setTimeout(fn, t);
+    demoTimers.push(setTimeout(fn, t));
   };
 
   // 1) Boot + understanding the request ────────────────────────────────────
@@ -328,6 +341,16 @@ export function runDemo(): void {
       unitPrice: 57.6,
       currency: "EUR",
       leadTimeDays: 4,
+    });
+    // Mirror the agreed quote into server state the instant it streams, so an
+    // early "Order Now" invoices the negotiated €57.60 — not the €62 opener.
+    // (Matches voice.ts, which already patches rfq on call.quote.)
+    rfq.patchVendor("bolt", {
+      status: "negotiating",
+      negotiatedPrice: 57.6,
+      currency: "EUR",
+      leadTimeDays: 4,
+      meetsDeadline: true,
     });
   });
   at(900, () => {

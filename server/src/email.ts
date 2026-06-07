@@ -35,13 +35,12 @@ function simulatedQuote(vendorId: string): SimQuote {
 }
 
 export async function sendRfqEmail(args: EmailArgs): Promise<void> {
+  // Route to the controlled demo inbox when configured — a REAL send to a safe,
+  // owned recipient (never cold-email a web-scraped business).
+  const to = process.env.DEMO_SUPPLIER_INBOX || args.to;
+
   // 1) Mark the email as sent + flip the vendor to "emailing".
-  bus.emit({
-    type: "email.sent",
-    vendorId: args.vendorId,
-    to: args.to,
-    subject: args.subject,
-  });
+  bus.emit({ type: "email.sent", vendorId: args.vendorId, to, subject: args.subject });
   rfq.patchVendor(args.vendorId, { status: "emailing" });
   bus.emit({
     type: "rfq.supplier_updated",
@@ -49,37 +48,49 @@ export async function sendRfqEmail(args: EmailArgs): Promise<void> {
     patch: { status: "emailing" },
   });
 
-  // 2) Best-effort real send via Gmail. Failures are swallowed by design.
-  if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
+  let realSent = false;
+
+  // 2a) Preferred real send: Resend (verified sending domain → any recipient).
+  if (process.env.RESEND_API_KEY) {
+    try {
+      const from = process.env.RESEND_FROM || "Procura <procura@vilichki.com>";
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ from, to, subject: args.subject, text: args.body || args.subject }),
+      });
+      realSent = res.ok;
+    } catch {
+      /* fall through to Gmail / simulation */
+    }
+  }
+
+  // 2b) Fallback real send: Gmail via nodemailer.
+  if (!realSent && process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
     try {
       const nodemailer = await import("nodemailer");
       const t = nodemailer.createTransport({
         service: "gmail",
-        auth: {
-          user: process.env.GMAIL_USER,
-          pass: process.env.GMAIL_APP_PASSWORD,
-        },
+        auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD },
       });
-      await t.sendMail({
-        from: process.env.GMAIL_USER,
-        to: args.to,
-        subject: args.subject,
-        text: args.body,
-      });
+      await t.sendMail({ from: process.env.GMAIL_USER, to, subject: args.subject, text: args.body });
+      realSent = true;
     } catch {
-      /* offline / bad creds — the simulated reply below still drives the demo */
+      /* offline / bad creds */
     }
   }
 
-  // 3) Only fabricate an inbound reply when Gmail is NOT configured (dev/offline).
-  //    With real email sending, prices come from real replies or the live calls.
-  if (!(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD)) {
+  // 3) Only fabricate an inbound reply when NOTHING real was sent (pure offline
+  //    dev). With a real send the quote comes from a real reply or the live call.
+  if (!realSent) {
     const vendorId = args.vendorId;
-    const from = args.to;
     setTimeout(() => {
       try {
         const { unitPrice, leadTimeDays, meetsDeadline } = simulatedQuote(vendorId);
-        bus.emit({ type: "email.reply", vendorId, from, unitPrice, leadTimeDays });
+        bus.emit({ type: "email.reply", vendorId, from: to, unitPrice, leadTimeDays });
         const patch = {
           status: "quoted" as const,
           initialPrice: unitPrice,

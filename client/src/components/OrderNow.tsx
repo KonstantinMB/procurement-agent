@@ -18,6 +18,7 @@ export default function OrderNow() {
   const vendorOrder = useStore((s) => s.vendorOrder);
   const order = useStore((s) => s.order);
   const request = useStore((s) => s.request);
+  const summary = useStore((s) => s.summary);
   const reduce = useReducedMotion();
 
   const [hideReceipt, setHideReceipt] = useState(false);
@@ -26,6 +27,10 @@ export default function OrderNow() {
     const list = vendorOrder.map((id) => vendors[id]).filter(Boolean) as Vendor[];
     const won = list.find((v) => v.status === "won");
     if (won) return won;
+    // Before the run concludes, keep the CTA hidden: a mid-run quote (e.g.
+    // EuroDrive) must not let the operator order the wrong vendor before the
+    // hero call closes. Only fall back to cheapest-eligible once a summary exists.
+    if (!summary) return undefined;
     const eligible = list.filter(
       (v) => effectivePrice(v) != null && v.meetsDeadline !== false,
     );
@@ -33,7 +38,7 @@ export default function OrderNow() {
     return eligible.reduce((best, v) =>
       effectivePrice(v)! < effectivePrice(best)! ? v : best,
     );
-  }, [vendors, vendorOrder]);
+  }, [vendors, vendorOrder, summary]);
 
   const placed = order?.placed ?? false;
   const invoice = order?.invoice;

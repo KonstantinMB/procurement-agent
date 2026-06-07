@@ -1,6 +1,19 @@
 import type { Invoice, RfqRequest, Vendor } from "./events";
 
 /**
+ * Stable slug for vendor ids: lowercase, non-alphanumeric runs → "-", trimmed.
+ * The SINGLE source of truth for ids — both id minting (add_supplier) and id
+ * resolution (resolve) must go through this, or a row keyed one way won't be
+ * found when looked up the other.
+ */
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
  * Server-side mirror of the RFQ so endpoints can compute the winner, savings,
  * and the final invoice. The browser holds the authoritative UI state; this is
  * just enough for order/summary logic.
@@ -21,6 +34,25 @@ class RfqState {
   }
   get(id: string): Vendor | undefined {
     return this.vendors.get(id);
+  }
+  /**
+   * Resolve the vendor an agent is referring to. The model routinely passes a
+   * human name ("Siboni S.r.l.") or a guessed slug where the canonical id is
+   * expected; try the exact id, then the slugified string, then a
+   * case-insensitive name match. Returns undefined only when truly unknown.
+   * This is what stops a call/quote from silently missing its row.
+   */
+  resolve(idOrName: string): Vendor | undefined {
+    if (!idOrName) return undefined;
+    const direct = this.vendors.get(idOrName);
+    if (direct) return direct;
+    const bySlug = this.vendors.get(slugify(idOrName));
+    if (bySlug) return bySlug;
+    const lower = idOrName.trim().toLowerCase();
+    for (const v of this.vendors.values()) {
+      if (v.name.toLowerCase() === lower) return v;
+    }
+    return undefined;
   }
   all(): Vendor[] {
     return [...this.vendors.values()];
@@ -59,7 +91,7 @@ class RfqState {
   }
 
   makeInvoice(vendorId?: string): Invoice | undefined {
-    const v = vendorId ? this.get(vendorId) : this.bestVendor();
+    const v = vendorId ? this.resolve(vendorId) : this.bestVendor();
     if (!v) return undefined;
     const unit = v.negotiatedPrice ?? v.initialPrice ?? 0;
     const qty = this.request?.quantity ?? 1;

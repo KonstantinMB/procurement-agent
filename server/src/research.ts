@@ -9,10 +9,24 @@
 // full parent env is passed through (needed for auth). Never throws.
 // ─────────────────────────────────────────────────────────────────────────
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 const DEBUG_LOG = "/tmp/procura_research_debug.log";
+
+// In-flight research subprocesses, so a new run (or a reset) can cancel the
+// previous request's web search instead of letting it stream stale suppliers.
+const activeChildren = new Set<ChildProcess>();
+export function cancelResearch(): void {
+  for (const c of activeChildren) {
+    try {
+      c.kill("SIGTERM");
+    } catch {
+      /* already gone */
+    }
+  }
+  activeChildren.clear();
+}
 
 export interface ResearchArgs {
   item: string;
@@ -47,12 +61,12 @@ function buildPrompt(a: ResearchArgs): string {
   const qty = a.quantity ? ` The buyer needs about ${a.quantity} units.` : "";
   const cur = a.currency ? ` Prefer prices in ${a.currency}.` : "";
   return [
-    `You are a procurement research assistant. Use web search to find ${count} REAL, currently-operating suppliers, distributors, or stockists of "${a.item}"${region}.${qty}`,
-    `For each, find: name; location (city, country); a real contact — phone preferred (the buyer will call), else email, else website URL; MOQ if stated; and a public/list unit price if shown online.${cur} Verify each via web search/fetch — never invent companies, contacts, or prices.`,
+    `You are a FAST procurement research assistant for a LIVE demo. Find ${count} REAL, currently-operating suppliers/distributors of "${a.item}"${region}.${qty}`,
+    `SPEED IS CRITICAL. Run ONE or two web searches, then emit suppliers straight from the search results — do NOT open each company's website to verify.${cur} Use only real companies that actually appear in the results — never invent names. For EVERY supplier always provide: a contact \`email\` (the published sales/procurement address, else the standard one for their domain like sales@theirdomain.com), an \`moq\` (estimate if unstated), and a \`unitPrice\` number — the public/list price if shown, otherwise your best market estimate.`,
     ``,
-    `IMPORTANT — stream your results: the MOMENT you verify a supplier, output it on its own line, immediately, before researching the next, in EXACTLY this form:`,
-    `SUPPLIER: {"name":"…","location":"…","phone":"…","email":"…","url":"…","moq":0,"unitPrice":0}`,
-    `(one compact JSON object on a single line; omit any key you don't have; unitPrice must be a number). Do this for each of the ${count} suppliers as you go.`,
+    `Stream as you go: the INSTANT you have a real name + location from the results, output it on its own line, before looking at the next, in EXACTLY this form:`,
+    `SUPPLIER: {"name":"…","location":"…","email":"…","moq":0,"unitPrice":0}`,
+    `(one compact JSON object per line; email and unitPrice are required — unitPrice must be a number, estimate it if needed). Emit all ${count} within about 20 seconds.`,
   ].join("\n");
 }
 
@@ -121,10 +135,12 @@ export function runClaudeResearch(
       ],
       { env: process.env, stdio: ["ignore", "pipe", "pipe"] }, // stdin ignored; full env for auth
     );
+    activeChildren.add(child);
 
     const finish = (why: string) => {
       if (settled) return;
       settled = true;
+      activeChildren.delete(child);
       // Fallback: parse any final JSON array we may have missed line-by-line.
       const i = lastResult.indexOf("[");
       const j = lastResult.lastIndexOf("]");

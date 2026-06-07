@@ -50,20 +50,28 @@ function StatusPill({ status }: { status: VendorStatus }) {
   );
 }
 
+// Contact prefers a real EMAIL (what the buyer reaches out on), then phone, then
+// the website as a last resort. Everything truncates with an ellipsis: the icon
+// is `shrink-0`, the text is `min-w-0 truncate`, and the row is capped by the
+// `max-w` wrapper in the cell — so a long address can never spill into MOQ.
 function Contact({ contact }: { contact: Vendor["contact"] }) {
   if (!contact) return <span className="text-faint">—</span>;
-  if (contact.phone)
-    return (
-      <span className="inline-flex items-center gap-1.5 text-muted">
-        <Phone size={13} className="shrink-0 text-faint" />
-        <span className="truncate">{contact.phone}</span>
-      </span>
-    );
   if (contact.email)
     return (
-      <span className="inline-flex items-center gap-1.5 text-muted">
+      <a
+        href={`mailto:${contact.email}`}
+        className="flex items-center gap-1.5 text-muted hover:text-brand"
+        title={contact.email}
+      >
         <Mail size={13} className="shrink-0 text-faint" />
-        <span className="truncate">{contact.email}</span>
+        <span className="min-w-0 truncate">{contact.email}</span>
+      </a>
+    );
+  if (contact.phone)
+    return (
+      <span className="flex items-center gap-1.5 text-muted" title={contact.phone}>
+        <Phone size={13} className="shrink-0 text-faint" />
+        <span className="min-w-0 truncate">{contact.phone}</span>
       </span>
     );
   if (contact.url)
@@ -72,10 +80,13 @@ function Contact({ contact }: { contact: Vendor["contact"] }) {
         href={contact.url}
         target="_blank"
         rel="noreferrer"
-        className="inline-flex items-center gap-1.5 text-brand hover:underline"
+        className="flex items-center gap-1.5 text-brand hover:underline"
+        title={contact.url}
       >
         <Globe size={13} className="shrink-0" />
-        <span className="truncate">{contact.url.replace(/^https?:\/\/(www\.)?/, "")}</span>
+        <span className="min-w-0 truncate">
+          {contact.url.replace(/^https?:\/\/(www\.)?/, "")}
+        </span>
       </a>
     );
   return <span className="text-faint">—</span>;
@@ -149,8 +160,10 @@ function VendorRow({ id, index }: { id: string; index: number }) {
         </div>
       </td>
       <td className={`${td} text-muted`}>{v.location ?? <span className="text-faint">—</span>}</td>
-      <td className={`${td} max-w-[200px] text-xs`}>
-        <Contact contact={v.contact} />
+      <td className={`${td} text-xs`}>
+        <div className="max-w-[220px]">
+          <Contact contact={v.contact} />
+        </div>
       </td>
       <td className={tdNum + " text-muted"}>{v.moq ?? <span className="text-faint">—</span>}</td>
       <td className={tdNum + " text-muted"}>

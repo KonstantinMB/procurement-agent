@@ -1,36 +1,10 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { bus } from "./bus";
-import { rfq } from "./state";
 import { appServer } from "./tools";
 import { SUBAGENTS } from "./subagents";
 import { SYSTEM_PROMPT } from "./prompts";
+import { cancelResearch } from "./research";
 import type { AskQuestion, ToolKind } from "./events";
-
-// ─── streaming-input inbox (keeps one long-running session open) ───────────
-let queue: any[] = [];
-let wake: (() => void) | null = null;
-let closed = false;
-let started = false;
-
-function enqueue(text: string): void {
-  queue.push({
-    type: "user",
-    message: { role: "user", content: text },
-    parent_tool_use_id: null,
-  });
-  wake?.();
-}
-
-async function* inbox(): AsyncGenerator<any> {
-  while (!closed) {
-    if (queue.length) {
-      yield queue.shift()!;
-      continue;
-    }
-    await new Promise<void>((r) => (wake = r));
-    wake = null;
-  }
-}
 
 // ─── pending AskUserQuestion resolvers ────────────────────────────────────
 const pendingQuestions = new Map<string, (answers: Record<string, string>) => void>();
@@ -45,17 +19,32 @@ export function answerQuestion(id: string, answers: Record<string, string>): voi
   bus.emit({ type: "question.answered", id, answers });
 }
 
+// ─── one fresh, independent agent run per Run click ────────────────────────
+// Each /api/command aborts any in-flight run (and its research subprocesses) and
+// starts a clean query(), so a previous request can't bleed into the next and a
+// crashed run can't wedge the agent into a permanently dead session.
+let currentAbort: AbortController | null = null;
+let pushToActive: ((text: string) => void) | null = null;
+
+function userMsg(text: string): any {
+  return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null };
+}
+
+/** Mid-run chat follow-up → inject into the active run (no-op when idle). */
 export function pushUserMessage(text: string): void {
-  enqueue(text);
+  pushToActive?.(text);
 }
 
 export function runAgent(text: string): void {
-  rfq.reset();
-  enqueue(text);
-  if (!started) {
-    started = true;
-    void startLoop();
-  }
+  currentAbort?.abort();
+  cancelResearch();
+  void startRun(text);
+}
+
+/** Abort any in-flight run + its research subprocesses (used by /api/reset). */
+export function stopAgent(): void {
+  currentAbort?.abort();
+  cancelResearch();
 }
 
 async function canUseTool(toolName: string, input: any): Promise<any> {
@@ -206,7 +195,29 @@ function handleMessage(m: any): void {
   }
 }
 
-async function startLoop(): Promise<void> {
+async function startRun(text: string): Promise<void> {
+  const abort = new AbortController();
+  currentAbort = abort;
+
+  // Per-run streaming inbox (lets chat follow-ups reach this run mid-flight).
+  let queue: any[] = [userMsg(text)];
+  let wake: (() => void) | null = null;
+  let closed = false;
+  pushToActive = (t: string) => {
+    queue.push(userMsg(t));
+    wake?.();
+  };
+  async function* inbox(): AsyncGenerator<any> {
+    while (!closed) {
+      if (queue.length) {
+        yield queue.shift()!;
+        continue;
+      }
+      await new Promise<void>((r) => (wake = r));
+      wake = null;
+    }
+  }
+
   const options: any = {
     model: "claude-opus-4-8",
     effort: "max",
@@ -231,14 +242,29 @@ async function startLoop(): Promise<void> {
     agents: SUBAGENTS,
     canUseTool,
     maxTurns: 80,
+    abortController: abort,
   };
 
   bus.emit({ type: "agent.thinking", active: true });
   try {
     const q = query({ prompt: inbox() as any, options });
-    for await (const m of q as any) handleMessage(m);
+    for await (const m of q as any) {
+      if (abort.signal.aborted) break;
+      handleMessage(m);
+    }
   } catch (err) {
-    bus.emit({ type: "status", phase: "error", message: String(err) });
-    bus.emit({ type: "done", ok: false });
+    if (!abort.signal.aborted) {
+      bus.emit({ type: "status", phase: "error", message: String(err) });
+      bus.emit({ type: "done", ok: false });
+    }
+  } finally {
+    closed = true;
+    // Cast: the assignment lives in the nested generator, so TS narrows the
+    // local to `null` here. Wake the inbox so it observes closed=true and exits.
+    (wake as (() => void) | null)?.();
+    if (currentAbort === abort) {
+      currentAbort = null;
+      pushToActive = null;
+    }
   }
 }

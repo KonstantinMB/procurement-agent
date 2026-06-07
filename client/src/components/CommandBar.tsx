@@ -1,8 +1,8 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { ArrowRight, Command } from "lucide-react";
+import { ArrowRight, Command, Play, RotateCcw } from "lucide-react";
 import { useStore } from "@/store";
-import { startCommand } from "@/lib/api";
+import { startCommand, startDemo, resetRun } from "@/lib/api";
 
 const PLACEHOLDER =
   "I need 50 brushless motors delivered by Friday under EUR 60/unit";
@@ -22,6 +22,16 @@ export default function CommandBar() {
   function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     run();
+  }
+
+  function tryDemo() {
+    useStore.getState().reset();
+    void startDemo();
+  }
+
+  function resetAll() {
+    useStore.getState().reset();
+    void resetRun();
   }
 
   return (
@@ -49,6 +59,26 @@ export default function CommandBar() {
           </button>
         </div>
       </form>
+
+      <button
+        type="button"
+        onClick={tryDemo}
+        disabled={running}
+        className="inline-flex h-12 shrink-0 items-center gap-2 rounded-xl bg-brand px-4 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Play className="h-4 w-4" aria-hidden />
+        Try demo
+      </button>
+
+      <button
+        type="button"
+        onClick={resetAll}
+        aria-label="Reset run"
+        title="Reset / abort"
+        className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border bg-surface text-muted transition-colors hover:border-brand hover:text-brand"
+      >
+        <RotateCcw className="h-4 w-4" aria-hidden />
+      </button>
     </div>
   );
 }

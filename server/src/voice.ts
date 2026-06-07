@@ -45,35 +45,37 @@ function isCallableNumber(p?: string): boolean {
  * (when configured) or a generic scripted fallback.
  */
 export async function callSupplier(args: CallArgs): Promise<CallResult> {
-  const dial = isCallableNumber(args.phone)
-    ? args.phone
-    : process.env.FALLBACK_PHONE_NUMBER ?? "";
+  const vapiReady = !!(
+    process.env.VAPI_API_KEY &&
+    process.env.VAPI_ASSISTANT_ID &&
+    process.env.VAPI_PHONE_NUMBER_ID
+  );
+  // Demo-safe dialing: when a controlled demo number is configured, ALWAYS ring
+  // it — Procura must never cold-call a real sourced business during a demo. Only
+  // if no demo number is set do we fall back to the supplier's discovered number.
+  const demoNumber = process.env.DEMO_SUPPLIER_NUMBER ?? process.env.FALLBACK_PHONE_NUMBER ?? "";
+  const dial = isCallableNumber(demoNumber)
+    ? demoNumber
+    : isCallableNumber(args.phone)
+      ? args.phone
+      : "";
 
-  if (!isCallableNumber(dial)) {
-    // No supplier number and no fallback configured — cannot place a call.
-    bus.emit({ type: "call.ended", vendorId: args.vendorId, outcome: "no-answer" });
-    rfq.patchVendor(args.vendorId, { note: "No phone number available" });
-    bus.emit({
-      type: "rfq.supplier_updated",
-      id: args.vendorId,
-      patch: { note: "No phone number available" },
-    });
-    return { transcript: "", success: false };
-  }
-
+  // Always "ring": the negotiation runs over a real Vapi call when fully
+  // configured, otherwise the scripted fallback (which needs no phone number) —
+  // so a supplier without a public number still gets negotiated on the board.
   bus.emit({
     type: "call.ringing",
     vendorId: args.vendorId,
     vendorName: args.vendorName,
-    phone: dial,
+    phone: dial || undefined,
   });
   rfq.patchVendor(args.vendorId, { status: "calling" });
   bus.emit({ type: "rfq.supplier_updated", id: args.vendorId, patch: { status: "calling" } });
 
-  if (process.env.VAPI_API_KEY) {
+  if (vapiReady && isCallableNumber(dial)) {
     try {
       const { VapiClient } = await import("@vapi-ai/server-sdk");
-      const client = new VapiClient({ token: process.env.VAPI_API_KEY });
+      const client = new VapiClient({ token: process.env.VAPI_API_KEY! });
       const call: any = await client.calls.create({
         assistantId: process.env.VAPI_ASSISTANT_ID,
         phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
@@ -90,15 +92,21 @@ export async function callSupplier(args: CallArgs): Promise<CallResult> {
       } as any);
       if (call?.id) {
         vendorByCall.set(call.id, args.vendorId);
-        return await new Promise<CallResult>((resolve) => {
-          pendingByCall.set(call.id, resolve);
-          setTimeout(() => {
-            if (pendingByCall.has(call.id)) {
-              pendingByCall.delete(call.id);
-              resolve({ transcript: "", success: false });
-            }
-          }, 180000);
-        });
+        // With a public webhook URL, Vapi streams events to /webhooks/vapi and
+        // handleVapiWebhook resolves this promise. On a laptop (no public URL)
+        // we poll the call ourselves instead.
+        if (process.env.PUBLIC_WEBHOOK_BASE) {
+          return await new Promise<CallResult>((resolve) => {
+            pendingByCall.set(call.id, resolve);
+            setTimeout(() => {
+              if (pendingByCall.has(call.id)) {
+                pendingByCall.delete(call.id);
+                resolve({ transcript: "", success: false });
+              }
+            }, 300000);
+          });
+        }
+        return await pollVapiCall(process.env.VAPI_API_KEY!, call.id, args);
       }
     } catch {
       /* fall through to the scripted call so it still works without Vapi */
@@ -106,6 +114,106 @@ export async function callSupplier(args: CallArgs): Promise<CallResult> {
   }
 
   return runScriptedCall(args);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Map a Vapi transcript role label ("AI" / "User") to our speaker enum. */
+function speakerOf(label: string): "agent" | "supplier" {
+  const l = label.trim().toLowerCase();
+  return l.startsWith("ai") || l.startsWith("assistant") || l.startsWith("bot")
+    ? "agent"
+    : "supplier";
+}
+
+/** Split a Vapi `artifact.transcript` blob into ordered {speaker,text} lines. */
+function parseTranscript(t: string): Array<{ speaker: "agent" | "supplier"; text: string }> {
+  const out: Array<{ speaker: "agent" | "supplier"; text: string }> = [];
+  for (const raw of t.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^([A-Za-z]+)\s*:\s*(.*)$/);
+    if (m) out.push({ speaker: speakerOf(m[1]!), text: m[2]! });
+    else out.push({ speaker: "supplier", text: line });
+  }
+  return out;
+}
+
+/**
+ * Poll a live Vapi call to completion when no public webhook URL is reachable
+ * (e.g. a laptop demo). Emits `call.connected` once it picks up, streams new
+ * transcript lines as they appear, and on `ended` publishes the negotiated quote
+ * (from the call's structured analysis) and flips the row to "negotiating".
+ */
+async function pollVapiCall(token: string, callId: string, args: CallArgs): Promise<CallResult> {
+  const currency = args.currency ?? "EUR";
+  const base = process.env.VAPI_API_BASE ?? "https://api.vapi.ai";
+  const deadline = Date.now() + 300000; // 5 min ceiling
+  let connected = false;
+  let emitted = 0; // transcript lines already pushed to the bus
+
+  while (Date.now() < deadline) {
+    await sleep(3500);
+    let data: any;
+    try {
+      const res = await fetch(`${base}/call/${callId}`, {
+        headers: { Authorization: `Bearer ${token}`, "User-Agent": "Mozilla/5.0 Procura" },
+      });
+      data = await res.json();
+    } catch {
+      continue; // transient network blip — retry next tick
+    }
+
+    const status = String(data?.status ?? "");
+    if (!connected && (status === "in-progress" || status === "forwarding")) {
+      connected = true;
+      bus.emit({ type: "call.connected", vendorId: args.vendorId });
+    }
+
+    // Stream any transcript lines we haven't sent yet.
+    const transcript = String(data?.artifact?.transcript ?? data?.transcript ?? "");
+    if (transcript) {
+      const lines = parseTranscript(transcript);
+      for (; emitted < lines.length; emitted++) {
+        const l = lines[emitted]!;
+        bus.emit({
+          type: "call.transcript",
+          vendorId: args.vendorId,
+          speaker: l.speaker,
+          text: l.text,
+          final: true,
+        });
+      }
+    }
+
+    if (status === "ended") {
+      const sd = data?.analysis?.structuredData ?? {};
+      const unitPrice = Number(sd.unitPrice) || Number(sd.price) || undefined;
+      const leadTimeDays = Number(sd.leadTimeDays) || args.leadTimeDays;
+      if (unitPrice != null && Number.isFinite(unitPrice)) {
+        bus.emit({
+          type: "call.quote",
+          vendorId: args.vendorId,
+          unitPrice,
+          currency,
+          leadTimeDays: leadTimeDays ?? 0,
+        });
+        const patch = {
+          status: "negotiating" as const,
+          negotiatedPrice: unitPrice,
+          currency,
+          ...(leadTimeDays != null ? { leadTimeDays } : {}),
+        };
+        rfq.patchVendor(args.vendorId, patch);
+        bus.emit({ type: "rfq.supplier_updated", id: args.vendorId, patch });
+      }
+      bus.emit({ type: "call.ended", vendorId: args.vendorId, outcome: "success" });
+      return { transcript, unitPrice: unitPrice ?? undefined, leadTimeDays: leadTimeDays ?? undefined, success: true };
+    }
+  }
+
+  bus.emit({ type: "call.ended", vendorId: args.vendorId, outcome: "no-answer" });
+  return { transcript: "", success: false };
 }
 
 /**

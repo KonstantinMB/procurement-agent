@@ -99,6 +99,7 @@ export type AgentEvent =
   | { type: "agent.message"; text: string } // finalized assistant message
   | { type: "status"; phase: string; message?: string }
   | { type: "done"; ok: boolean }
+  | { type: "run.reset" } // wipe the client projection for a fresh run
   // tool activity (drives the activity panel + swarm)
   | {
       type: "tool.call";

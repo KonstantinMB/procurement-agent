@@ -1,21 +1,32 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { bus } from "./bus";
-import { rfq } from "./state";
+import { rfq, slugify } from "./state";
 import { sendRfqEmail } from "./email";
 import { callSupplier } from "./voice";
 import { runClaudeResearch } from "./research";
 import type { Vendor, VendorStatus } from "./events";
 
-/** Stable slug for vendor ids: lowercase, non-alphanumeric runs → "-", trimmed. */
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+/**
+ * Resolve the vendor the agent named — by canonical id OR human name — to its
+ * table row, creating a minimal "discovered" row if it's genuinely new. This is
+ * the load-bearing fix for "the call never reached the table": the model
+ * frequently passes a name where the slug id is expected, and a bare Map miss
+ * would silently drop the call/quote/status. Emitting `rfq.supplier_added` on
+ * creation also guarantees the row exists *before* we call or quote against it.
+ */
+function ensureVendor(idOrName: string): Vendor {
+  const found = rfq.resolve(idOrName);
+  if (found) return found;
+  const vendor: Vendor = {
+    id: slugify(idOrName) || idOrName,
+    name: idOrName,
+    status: "discovered",
+  };
+  rfq.upsertVendor(vendor);
+  bus.emit({ type: "rfq.supplier_added", vendor });
+  return vendor;
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * In-process MCP server exposing the agent's procurement tools. Every tool is a
@@ -54,7 +65,7 @@ export const appServer = createSdkMcpServer({
 
     tool(
       "add_supplier",
-      "Add a discovered supplier to the live table. Include unitPrice ONLY when a real public/list price exists.",
+      "Add a discovered REAL supplier to the live table. Always pass a contact `email` (published, else the standard one for the domain like sales@theirdomain.com) and an estimated `unitPrice` number (public/list price if known, else your best market estimate) so the Contact and Est. price columns fill in. The company must be real; the price may be an informed estimate.",
       {
         name: z.string(),
         location: z.string().optional(),
@@ -82,7 +93,11 @@ export const appServer = createSdkMcpServer({
         };
         rfq.upsertVendor(vendor);
         bus.emit({ type: "rfq.supplier_added", vendor });
-        return { content: [{ type: "text", text: "Added " + name }] };
+        // Surface the canonical id so later call/update tools can target this
+        // exact row (passing the name works too — see ensureVendor).
+        return {
+          content: [{ type: "text", text: `Added ${name} (id: ${vendor.id})` }],
+        };
       },
     ),
 
@@ -168,7 +183,7 @@ export const appServer = createSdkMcpServer({
 
     tool(
       "update_quote",
-      "Update a supplier's quote, status, lead time, or note on the board.",
+      "Update a supplier's quote, status, lead time, or note on the board. `id` is the supplier's id or exact name — record an outcome on the SAME supplier you discovered or called.",
       {
         id: z.string(),
         unitPrice: z.number().optional(),
@@ -178,19 +193,19 @@ export const appServer = createSdkMcpServer({
         meetsDeadline: z.boolean().optional(),
       },
       async ({ id, unitPrice, leadTimeDays, status, note, meetsDeadline }) => {
+        const vendor = ensureVendor(id);
         const patch: Partial<Vendor> = {};
         if (status !== undefined) patch.status = status as VendorStatus;
         if (unitPrice !== undefined) {
           patch.negotiatedPrice = unitPrice;
-          const existing = rfq.get(id);
-          if (existing?.initialPrice == null) patch.initialPrice = unitPrice;
+          if (vendor.initialPrice == null) patch.initialPrice = unitPrice;
         }
         if (leadTimeDays !== undefined) patch.leadTimeDays = leadTimeDays;
         if (note !== undefined) patch.note = note;
         if (meetsDeadline !== undefined) patch.meetsDeadline = meetsDeadline;
-        rfq.patchVendor(id, patch);
-        bus.emit({ type: "rfq.supplier_updated", id, patch });
-        return { content: [{ type: "text", text: "Updated " + id }] };
+        rfq.patchVendor(vendor.id, patch);
+        bus.emit({ type: "rfq.supplier_updated", id: vendor.id, patch });
+        return { content: [{ type: "text", text: "Updated " + vendor.name }] };
       },
     ),
 
@@ -226,10 +241,10 @@ export const appServer = createSdkMcpServer({
         body: z.string().optional(),
       },
       async ({ vendorId, subject, body }) => {
-        const vendor = rfq.get(vendorId);
-        const to = vendor?.contact?.email ?? "sales@example.com";
+        const vendor = ensureVendor(vendorId);
+        const to = vendor.contact?.email ?? "sales@example.com";
         await sendRfqEmail({
-          vendorId,
+          vendorId: vendor.id,
           to,
           subject: subject ?? "RFQ",
           body: body ?? "",
@@ -242,7 +257,7 @@ export const appServer = createSdkMcpServer({
 
     tool(
       "call_supplier",
-      "Place a phone call to negotiate a quote with a supplier.",
+      "Place a phone call to negotiate a quote with a supplier. `vendorId` is the supplier's id or exact name; the row is added to the table (if new) and flipped to “calling” before dialing, then updated with the negotiated price afterwards.",
       {
         vendorId: z.string(),
         goal: z.string().optional(),
@@ -251,16 +266,19 @@ export const appServer = createSdkMcpServer({
         leadTimeDays: z.number().optional(),
       },
       async ({ vendorId, goal, targetPrice, walkAway, leadTimeDays }) => {
-        const vendor = rfq.get(vendorId);
+        // Resolve to the canonical row first: the call's ringing/quote/status
+        // events key off this id, so a name→row mismatch here is exactly what
+        // used to leave the called supplier stuck on "Discovered".
+        const vendor = ensureVendor(vendorId);
         const res = await callSupplier({
-          vendorId,
-          vendorName: vendor?.name ?? vendorId,
-          phone: vendor?.contact?.phone ?? "",
+          vendorId: vendor.id,
+          vendorName: vendor.name,
+          phone: vendor.contact?.phone ?? "",
           goal: goal ?? "negotiate a quote",
           targetPrice,
           walkAway,
           leadTimeDays,
-          currency: vendor?.currency ?? "EUR",
+          currency: vendor.currency ?? rfq.request?.currency ?? "EUR",
         });
         const priceText =
           res.unitPrice != null
@@ -272,7 +290,7 @@ export const appServer = createSdkMcpServer({
               type: "text",
               text:
                 "Call with " +
-                (vendor?.name ?? vendorId) +
+                vendor.name +
                 ": " +
                 priceText +
                 ". " +

@@ -94,6 +94,7 @@ export type AgentEvent =
   | { type: "agent.message"; text: string }
   | { type: "status"; phase: string; message?: string }
   | { type: "done"; ok: boolean }
+  | { type: "run.reset" } // wipe the client projection for a fresh run
   | {
       type: "tool.call";
       id: string;

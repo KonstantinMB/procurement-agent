@@ -5,8 +5,8 @@ import { streamSSE } from "hono/streaming";
 import { config } from "dotenv";
 import { bus } from "./bus";
 import { rfq } from "./state";
-import { runDemo } from "./demo";
-import { runAgent, pushUserMessage, answerQuestion } from "./agent";
+import { runDemo, stopDemo } from "./demo";
+import { runAgent, pushUserMessage, answerQuestion, stopAgent } from "./agent";
 import { handleVapiWebhook } from "./voice";
 
 config();
@@ -40,8 +40,11 @@ app.get("/events", (c) =>
 app.post("/api/command", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
   const text = String(body?.text ?? "");
+  // Run = the REAL agent pipeline (live Claude Agent SDK: real web-search
+  // discovery, email, voice). The scripted mock lives ONLY at /api/demo.
+  stopDemo();
   rfq.reset();
-  // Show the request on the dashboard instantly; the agent refines it via set_request.
+  bus.emit({ type: "run.reset" });
   rfq.setRequest({ raw: text });
   bus.emit({ type: "rfq.request", request: { raw: text } });
   runAgent(text);
@@ -79,7 +82,10 @@ app.post("/api/order", async (c) => {
 });
 
 app.post("/api/reset", (c) => {
+  stopAgent();
+  stopDemo();
   rfq.reset();
+  bus.emit({ type: "run.reset" });
   return c.json({ ok: true });
 });
 
@@ -90,6 +96,16 @@ app.post("/webhooks/vapi", async (c) => {
 });
 
 const port = Number(process.env.PORT ?? 8787);
-serve({ fetch: app.fetch, port });
+const server = serve({ fetch: app.fetch, port });
 // eslint-disable-next-line no-console
 console.log(`[procura] server listening on http://localhost:${port}`);
+
+// Close the listener on shutdown so `tsx watch` can rebind the port cleanly on
+// the next reload — otherwise the new process races the dying one → EADDRINUSE.
+// The 1s safety timer forces exit if a long-lived SSE stream won't drain.
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.once(sig, () => {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
+  });
+}

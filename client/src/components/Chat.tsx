@@ -1,9 +1,105 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Send } from "lucide-react";
+import { ArrowRight, Send } from "lucide-react";
 import { useStore } from "@/store";
 import { sendChat, answerQuestion } from "@/lib/api";
-import { fadeUp, SPRING_SNAPPY } from "@/lib/motion";
+import { fadeUp } from "@/lib/motion";
+import type { AskQuestion } from "@/lib/events";
+
+interface ActiveQuestion {
+  id: string;
+  questions: AskQuestion[];
+}
+
+/**
+ * Inline multi-question decision card. The agent's run stays PAUSED until every
+ * question has a selection: clicking an option only selects it (single-select
+ * replaces the pick, multi-select toggles) — nothing is submitted until the one
+ * "Continue" button, which sends every answer at once.
+ */
+function QuestionPrompt({ q }: { q: ActiveQuestion }) {
+  const reduce = useReducedMotion();
+  const [picks, setPicks] = useState<Record<string, string[]>>({});
+
+  const toggle = (qText: string, label: string, multi: boolean) =>
+    setPicks((prev) => {
+      const cur = prev[qText] ?? [];
+      if (!multi) return { ...prev, [qText]: [label] };
+      return {
+        ...prev,
+        [qText]: cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label],
+      };
+    });
+
+  const allAnswered = q.questions.every((qq) => (picks[qq.question]?.length ?? 0) > 0);
+
+  const submit = () => {
+    if (!allAnswered) return;
+    const answers: Record<string, string> = {};
+    for (const qq of q.questions) answers[qq.question] = (picks[qq.question] ?? []).join(", ");
+    void answerQuestion(q.id, answers);
+  };
+
+  const showProgress = q.questions.length > 1;
+
+  return (
+    <motion.div
+      layout={!reduce}
+      variants={fadeUp}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      className="rounded-xl border border-brand/30 bg-brand-tint p-3 shadow-[var(--shadow-pop)]"
+    >
+      {q.questions.map((qq, i) => (
+        <div
+          key={`${qq.header}:${i}`}
+          className={i > 0 ? "mt-3 border-t border-brand/15 pt-3" : ""}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium text-ink">{qq.question}</p>
+            {showProgress && (
+              <span className="eyebrow shrink-0">
+                {i + 1}/{q.questions.length}
+              </span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {qq.options.map((option) => {
+              const selected = (picks[qq.question] ?? []).includes(option.label);
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  title={option.description}
+                  aria-pressed={selected}
+                  onClick={() => toggle(qq.question, option.label, qq.multiSelect)}
+                  className={
+                    selected
+                      ? "rounded-lg border border-brand bg-brand px-3 py-1.5 text-sm font-medium text-white"
+                      : "rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-ink transition-colors hover:border-brand"
+                  }
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!allAnswered}
+        className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Continue
+        <ArrowRight className="h-4 w-4" aria-hidden />
+      </button>
+    </motion.div>
+  );
+}
 
 export default function Chat() {
   const chat = useStore((s) => s.chat);
@@ -69,39 +165,10 @@ export default function Chat() {
           </p>
         )}
 
-        {/* Inline decision prompts */}
+        {/* Inline decision prompt — the agent stays paused until EVERY question
+            has a selection; one "Continue" submits the whole set. */}
         <AnimatePresence initial={false}>
-          {question?.questions.map((q, i) => (
-            <motion.div
-              key={`${question.id}:${i}`}
-              layout={!reduce}
-              variants={fadeUp}
-              initial="initial"
-              animate="animate"
-              exit="exit"
-              whileHover={reduce ? undefined : { y: -2, transition: SPRING_SNAPPY }}
-              className="rounded-xl border border-brand/30 bg-brand-tint p-3 shadow-[var(--shadow-pop)]"
-            >
-              <p className="text-sm font-medium text-ink">{q.question}</p>
-              <div className="mt-2.5 flex flex-wrap gap-1.5">
-                {q.options.map((option) => (
-                  <button
-                    key={option.label}
-                    type="button"
-                    title={option.description}
-                    onClick={() =>
-                      void answerQuestion(question.id, {
-                        [q.question]: option.label,
-                      })
-                    }
-                    className="rounded-lg border border-border bg-surface px-3 py-1.5 text-sm text-ink transition-colors hover:border-brand"
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            </motion.div>
-          ))}
+          {question && <QuestionPrompt key={question.id} q={question} />}
         </AnimatePresence>
       </div>
 
