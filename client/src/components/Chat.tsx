@@ -104,6 +104,7 @@ function QuestionPrompt({ q }: { q: ActiveQuestion }) {
 export default function Chat() {
   const chat = useStore((s) => s.chat);
   const question = useStore((s) => s.question);
+  const activeRunId = useStore((s) => s.activeRunId);
   const reduce = useReducedMotion();
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -116,10 +117,10 @@ export default function Chat() {
 
   function submit() {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || !activeRunId) return;
     setDraft("");
     useStore.getState().pushChat("user", text);
-    void sendChat(text);
+    void sendChat(activeRunId, text);
   }
 
   return (

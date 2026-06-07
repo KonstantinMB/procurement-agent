@@ -4,10 +4,10 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { config } from "dotenv";
 import { bus } from "./bus";
-import { rfq } from "./state";
-import { runDemo, stopDemo } from "./demo";
-import { runAgent, pushUserMessage, answerQuestion, stopAgent } from "./agent";
+import { runAgent, pushUserMessage, answerQuestion } from "./agent";
+import { allRuns, getRun, removeRun, resetAllRuns } from "./runs";
 import { handleVapiWebhook } from "./voice";
+import { sendOrderEmail } from "./email";
 
 config();
 
@@ -23,44 +23,53 @@ app.get("/events", (c) =>
     });
     stream.onAbort(() => unsub());
     await stream.writeSSE({ data: JSON.stringify({ type: "status", phase: "connected" }) });
-    // replay current state so a page reload mid-run catches up
-    if (rfq.request)
-      await stream.writeSSE({ data: JSON.stringify({ type: "rfq.request", request: rfq.request }) });
-    for (const v of rfq.all())
-      await stream.writeSSE({ data: JSON.stringify({ type: "rfq.supplier_added", vendor: v }) });
+
+    // Replay every live run so a page reload rebuilds the whole dashboard. Each
+    // event is tagged with its run's id — the same shape the bus stamps live.
+    for (const ctx of allRuns()) {
+      const runId = ctx.id;
+      await stream.writeSSE({
+        data: JSON.stringify({
+          type: "run.created",
+          request: ctx.state.request ?? { raw: "" },
+          createdAt: ctx.createdAt,
+          running: ctx.running,
+          runId,
+        }),
+      });
+      if (ctx.state.request)
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "rfq.request", request: ctx.state.request, runId }),
+        });
+      for (const v of ctx.state.all())
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "rfq.supplier_added", vendor: v, runId }),
+        });
+    }
+
     while (!stream.aborted) {
       await stream.sleep(15000);
       if (stream.aborted) break;
       await stream.writeSSE({ data: "", event: "ping" });
     }
     unsub();
-  })
+  }),
 );
 
 app.post("/api/command", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
   const text = String(body?.text ?? "");
-  // Run = the REAL agent pipeline (live Claude Agent SDK: real web-search
-  // discovery, email, voice). The scripted mock lives ONLY at /api/demo.
-  stopDemo();
-  rfq.reset();
-  bus.emit({ type: "run.reset" });
-  rfq.setRequest({ raw: text });
-  bus.emit({ type: "rfq.request", request: { raw: text } });
-  runAgent(text);
-  return c.json({ ok: true });
-});
-
-app.post("/api/demo", (c) => {
-  rfq.reset();
-  runDemo();
-  return c.json({ ok: true });
+  if (!text) return c.json({ ok: false, error: "empty request" }, 400);
+  // Each command starts a NEW parallel run — existing runs keep going.
+  const runId = runAgent(text);
+  return c.json({ ok: true, runId });
 });
 
 app.post("/api/chat", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
+  const runId = String(body?.runId ?? "");
   const text = String(body?.text ?? "");
-  if (text) pushUserMessage(text);
+  if (runId && text) pushUserMessage(runId, text);
   return c.json({ ok: true });
 });
 
@@ -72,20 +81,45 @@ app.post("/api/answer", async (c) => {
 
 app.post("/api/order", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
+  const runId = String(body?.runId ?? "");
   const vendorId = body?.vendorId ? String(body.vendorId) : undefined;
-  bus.emit({ type: "order.placed", vendorId: vendorId ?? "" });
-  const invoice = rfq.makeInvoice(vendorId);
-  setTimeout(() => {
-    if (invoice) bus.emit({ type: "order.receipt", invoice });
-  }, 900);
+  const ctx = getRun(runId);
+  if (!ctx) return c.json({ ok: false, error: "unknown run" }, 404);
+
+  ctx.emit({ type: "order.placed", vendorId: vendorId ?? "" });
+  const invoice = ctx.state.makeInvoice(vendorId);
+
+  // Send the purchase order to the winning supplier. Fire-and-forget so the
+  // response (and the receipt) isn't held up by the network round-trip;
+  // sendOrderEmail never throws and routes to the demo inbox when configured.
+  if (invoice) {
+    const winner = vendorId ? ctx.state.resolve(vendorId) : ctx.state.bestVendor();
+    void sendOrderEmail({
+      to: winner?.contact?.email ?? "sales@example.com",
+      invoice,
+      item: ctx.state.request?.item,
+      deadline: ctx.state.request?.deadline,
+      vendorId: winner?.id,
+    }).then((sent) => {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[procura] PO ${invoice.poNumber} for ${invoice.vendorName}: ${sent ? "emailed" : "skipped (no mail creds)"}`,
+      );
+    });
+    setTimeout(() => ctx.emit({ type: "order.receipt", invoice }), 900);
+  }
   return c.json({ ok: true, invoice });
 });
 
+app.post("/api/run/remove", async (c) => {
+  const body = await c.req.json().catch(() => ({}) as any);
+  if (body?.runId) removeRun(String(body.runId));
+  return c.json({ ok: true });
+});
+
 app.post("/api/reset", (c) => {
-  stopAgent();
-  stopDemo();
-  rfq.reset();
-  bus.emit({ type: "run.reset" });
+  // Global dashboard reset: abort + drop every run (emits run.reset).
+  resetAllRuns();
   return c.json({ ok: true });
 });
 

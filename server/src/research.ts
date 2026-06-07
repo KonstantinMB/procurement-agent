@@ -14,18 +14,12 @@ import { appendFileSync } from "node:fs";
 
 const DEBUG_LOG = "/tmp/procura_research_debug.log";
 
-// In-flight research subprocesses, so a new run (or a reset) can cancel the
-// previous request's web search instead of letting it stream stale suppliers.
-const activeChildren = new Set<ChildProcess>();
-export function cancelResearch(): void {
-  for (const c of activeChildren) {
-    try {
-      c.kill("SIGTERM");
-    } catch {
-      /* already gone */
-    }
-  }
-  activeChildren.clear();
+/** Per-run handles so a run (or reset) cancels only ITS own web search. */
+export interface ResearchControl {
+  /** The owning run's child set — the spawned process registers/deregisters here. */
+  childSet?: Set<ChildProcess>;
+  /** The owning run's abort signal — fires SIGTERM when the run is cancelled. */
+  signal?: AbortSignal;
 }
 
 export interface ResearchArgs {
@@ -96,6 +90,7 @@ function coerce(s: any): ResearchedSupplier | null {
 export function runClaudeResearch(
   a: ResearchArgs,
   handlers: ResearchHandlers = {},
+  control: ResearchControl = {},
 ): Promise<ResearchedSupplier[]> {
   const prompt = buildPrompt(a);
   const model = process.env.RESEARCH_MODEL ?? "claude-sonnet-4-6";
@@ -135,12 +130,13 @@ export function runClaudeResearch(
       ],
       { env: process.env, stdio: ["ignore", "pipe", "pipe"] }, // stdin ignored; full env for auth
     );
-    activeChildren.add(child);
+    control.childSet?.add(child);
 
     const finish = (why: string) => {
       if (settled) return;
       settled = true;
-      activeChildren.delete(child);
+      control.childSet?.delete(child);
+      control.signal?.removeEventListener("abort", onAbort);
       // Fallback: parse any final JSON array we may have missed line-by-line.
       const i = lastResult.indexOf("[");
       const j = lastResult.lastIndexOf("]");
@@ -171,6 +167,21 @@ export function runClaudeResearch(
       }
       finish("timeout");
     }, 1200000); // 20 min
+
+    // Cancel cleanly when the owning run is aborted (new run / reset / shutdown).
+    const onAbort = () => {
+      clearTimeout(timer);
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* ignore */
+      }
+      finish("aborted");
+    };
+    if (control.signal) {
+      if (control.signal.aborted) onAbort();
+      else control.signal.addEventListener("abort", onAbort);
+    }
 
     // Scan plain text for streamed "SUPPLIER: {…}" lines.
     const scanText = (text: string) => {

@@ -19,6 +19,7 @@ export default function OrderNow() {
   const order = useStore((s) => s.order);
   const request = useStore((s) => s.request);
   const summary = useStore((s) => s.summary);
+  const activeRunId = useStore((s) => s.activeRunId);
   const reduce = useReducedMotion();
 
   const [hideReceipt, setHideReceipt] = useState(false);
@@ -71,7 +72,7 @@ export default function OrderNow() {
         type="button"
         layout
         onClick={() => {
-          if (!placed) void placeOrder(winner.id);
+          if (!placed && activeRunId) void placeOrder(activeRunId, winner.id);
         }}
         disabled={placed}
         aria-label={`Order ${quantity} from ${winner.name}`}

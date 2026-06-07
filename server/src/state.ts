@@ -14,11 +14,12 @@ export function slugify(name: string): string {
 }
 
 /**
- * Server-side mirror of the RFQ so endpoints can compute the winner, savings,
- * and the final invoice. The browser holds the authoritative UI state; this is
- * just enough for order/summary logic.
+ * Server-side mirror of ONE run's RFQ so endpoints can compute the winner,
+ * savings, and the final invoice. One instance per run (see runs.ts). The
+ * browser holds the authoritative UI state; this is just enough for
+ * order/summary logic.
  */
-class RfqState {
+export class RfqState {
   request: RfqRequest | undefined;
   vendors = new Map<string, Vendor>();
 
@@ -108,5 +109,3 @@ class RfqState {
     };
   }
 }
-
-export const rfq = new RfqState();

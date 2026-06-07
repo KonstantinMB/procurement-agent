@@ -1,20 +1,22 @@
-import type { AgentEvent } from "./events";
+import type { AgentEvent, WireEvent } from "./events";
 
-type Listener = (e: AgentEvent) => void;
+type Listener = (e: WireEvent) => void;
 
 /**
- * Central event bus. Every source of truth (the demo emitter, the Claude Agent
- * SDK stream mapper, the Vapi/email handlers) calls `bus.emit(...)`. The SSE
- * endpoint subscribes and forwards each event to the browser. The UI is a pure
+ * Central event bus. Every source of truth (the Claude Agent SDK stream mapper,
+ * the Vapi/email handlers, the per-run tools) calls `bus.emit(event, runId)`.
+ * The bus stamps the runId onto the event so the SSE endpoint can forward it and
+ * the browser can route it into the right run's slice. The UI is a pure
  * projection of this stream.
  */
 class EventBus {
   private listeners = new Set<Listener>();
 
-  emit(e: AgentEvent): void {
+  emit(e: AgentEvent, runId?: string): void {
+    const wire: WireEvent = runId ? { ...e, runId } : e;
     for (const l of [...this.listeners]) {
       try {
-        l(e);
+        l(wire);
       } catch {
         /* a slow/broken subscriber must not break the emit loop */
       }

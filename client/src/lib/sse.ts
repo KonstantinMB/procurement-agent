@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useStore } from "@/store";
-import type { AgentEvent } from "@/lib/events";
+import type { WireEvent } from "@/lib/events";
 
 /**
  * Subscribe to the server's SSE event stream. Events are buffered and flushed
@@ -13,7 +13,7 @@ export function useAgentStream(): void {
 
   useEffect(() => {
     const es = new EventSource("/events");
-    let buffer: AgentEvent[] = [];
+    let buffer: WireEvent[] = [];
     let raf = 0;
 
     const flush = () => {
@@ -29,7 +29,7 @@ export function useAgentStream(): void {
     es.onmessage = (ev: MessageEvent<string>) => {
       if (!ev.data) return;
       try {
-        const parsed = JSON.parse(ev.data) as AgentEvent | AgentEvent[];
+        const parsed = JSON.parse(ev.data) as WireEvent | WireEvent[];
         if (Array.isArray(parsed)) buffer.push(...parsed);
         else buffer.push(parsed);
       } catch {
