@@ -160,13 +160,11 @@ export default function VendorThread({ vendorId }: { vendorId: string }) {
             <PhoneOff size={14} className="mt-0.5 shrink-0 text-faint" />
             <div className="flex flex-col gap-1">
               <span className="font-medium text-ink">
-                No transcript captured for this supplier
+                No call transcript yet
               </span>
               <span className="text-xs text-muted">
-                If you're using Vapi for live calls, transcript events arrive
-                via webhook — make sure Vapi can reach your public URL.
-                Otherwise the scripted demo path will emit a transcript
-                automatically.
+                The transcript will appear here as soon as Procura starts a
+                call with this supplier.
               </span>
             </div>
           </div>
