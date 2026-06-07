@@ -1,0 +1,374 @@
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ AI Procurement Officer — Hackathon Build Plan
+
+ ▎ Working title (swap freely): "Atlas" — an autonomous AI procurement officer you brief in one sentence, that finds suppliers, calls and negotiates by voice live, emails RFQs, fills a real-time comparison dashboard, and closes the deal on one
+ ▎ button.
+
+ Context
+
+ This is a hackathon project (stack: Claude Agent SDK). The buyer types a single request into a command bar — e.g. "I need 50 brushless motors delivered by Friday under €60/unit" — and a headless Claude Agent SDK loop (Opus 4.8, effort: max)
+ autonomously runs a full procurement cycle while the UI shows what the agent is doing, live:
+
+ 1. Spawns sub-agents to search the web for suppliers (the "swarm").
+ 2. Places a real outbound AI phone call (via Vapi — Claude brain + ElevenLabs voice) to a supplier and negotiates price/lead-time live.
+ 3. Emails RFQs to other suppliers.
+ 4. Auto-populates a real-time RFQ comparison dashboard.
+ 5. Keeps a chat going and uses AskUserQuestion to ask the buyer for missing requirements.
+ 6. Ends with a master "Order Now" button (payment simulated — "fake it till you make it").
+
+ Why: Validated demand exists (Pactum, Mandel AI — both funded) but nobody glues web-discovery + live voice negotiation + dashboard + one-click close into a single "AI employee." The voice call is the reliable jaw-drop. Goal: a flashy, reliable
+ demo that makes judges go "wow."
+
+ Decisions locked with the user
+
+ - Real: Agent SDK orchestration · multi-subagent web search · live phone call (hero) · email RFQs · real-time dashboard · chat + AskUserQuestion · Order Now button.
+ - Simulated: Stripe/payment + invoice settlement at the end (no real charge).
+ - Stack: Vite + React + TypeScript + Tailwind (client); Hono (Node 24) backend running the Agent SDK; SSE for server→client streaming.
+ - Auth: Agent SDK uses the already-authenticated claude CLI (no ANTHROPIC_API_KEY).
+ - Keys user provides: Vapi (orchestrates the call), ElevenLabs (voice), Twilio (optional — only if BYO number into Vapi), OpenAI/Whisper (optional).
+ - Time budget: treat as a full hackathon day; plan is tiered (demo-safe core → polish) so it degrades gracefully.
+
+ ---
+ Architecture
+
+ ┌─────────────────────────── CLIENT (Vite + React + TS + Tailwind) ──────────────────────────┐
+ │  CommandBar  ·  AgentActivityRail (live)  ·  RFQ Board  ·  CallPanel (cinematic)  ·  Chat   │
+ │        ▲  SSE (EventSource): one typed event stream drives every live component             │
+ └────────│───────────────────────────────────────────────────────────────────────────────────┘
+          │  POST /command  /chat  /order        GET /events (SSE)        POST /webhooks/elevenlabs/*
+ ┌────────▼───────────────────────────── SERVER (Hono, Node 24) ───────────────────────────────┐
+ │  Event Bus (in-mem) ──► SSE   │   RFQ State Store   │   Voice (Vapi)              │  Email  │
+ │                                                                                              │
+ │  Claude Agent SDK  query({ prompt: <streaming inbox>, options })   model=claude-opus-4-8     │
+ │   • effort:"max", thinking adaptive, includePartialMessages:true                             │
+ │   • in-process MCP tools (createSdkMcpServer): add_supplier, update_quote, set_rfq_summary,  │
+ │     call_supplier, send_rfq_email, check_email_replies                                       │
+ │   • subagents (agents): "supplier-scout" ×N run in parallel (web search)                     │
+ │   • canUseTool: handles AskUserQuestion → UI; auto-allows our tools                          │
+ │  Two event sources feed the bus: (a) the SDK message stream, (b) tool handlers doing work    │
+ └──────────────────────────────────────────────────────────────────────────────────────────────┘
+
+ Repo layout (npm workspaces in /Users/mac/Downloads/Digithon  — note the trailing space in the dir name; quote all paths):
+ package.json            # workspaces: ["client","server"], root scripts (dev runs both)
+ server/
+   src/index.ts          # Hono app: SSE /events, POST /command /chat /order, EL webhooks
+   src/agent.ts          # query() session, options, message-stream → bus mapping
+   src/tools.ts          # createSdkMcpServer + tool() definitions (dashboard/call/email)
+   src/subagents.ts      # AgentDefinition map (supplier-scout, ...)
+   src/voice.ts          # Vapi outbound call kickoff + report_quote/status/transcript/end-of-call webhooks
+   src/email.ts          # Nodemailer send (+ optional IMAP poll)
+   src/bus.ts            # typed EventBus → SSE fan-out
+   src/state.ts          # RFQ state (suppliers, quotes, summary)
+   src/events.ts         # shared event type union (imported by client too)
+   src/demo.ts           # MOCK MODE: replay a scripted event timeline (demo-safe fallback)
+ client/
+   src/main.tsx, App.tsx
+   src/lib/sse.ts        # EventSource hook (reconnect)
+   src/store.ts          # zustand store: events + RFQ + call + chat state
+   src/components/...     # Sidebar, TopBar, CommandBar, ActivityPanel, ToolCard, SwarmView,
+                          #   RfqBoard, VendorCard, CallPanel, VoiceOrb, Transcript, Chat, OrderNow, Receipt
+   src/assets/svg/        # custom SVG: logomark/wordmark, agent glyphs (web/call/email/quote), empty-state, "thinking" mark
+ .env                    # VAPI_*, ELEVENLABS_API_KEY, TWILIO_* (optional BYO number), GMAIL_*
+
+ Canonical event model (server → client, the contract for the whole UI)
+
+ A discriminated union in server/src/events.ts, shared with the client:
+ - agent.ready { model, apiKeySource }
+ - agent.text_delta { text } · agent.thinking { active }
+ - tool.call { id, name, label, input, status:"running" } · tool.result { id, status:"done"|"error", summary }
+ - subagent.spawned { id, parentId, role } · subagent.done { id }
+ - rfq.supplier_added { vendor } · rfq.supplier_updated { id, patch }  (status, initialPrice, negotiatedPrice, leadTimeDays)
+ - rfq.summary { headline, savings, withinBudget }
+ - call.ringing { supplierId } · call.connected · call.transcript { speaker, text } · call.quote { price, leadTimeDays } · call.ended { outcome }
+ - email.sent { supplierId, to } · email.reply { supplierId, parsed }
+ - question.ask { id, questions } · question.answered { id, answers }
+ - order.placed · order.receipt { invoice }
+
+ Why this matters: the dashboard is the agent's tool-calls, streamed. The agent drives the board by calling add_supplier / update_quote (handlers emit rfq.*); the SDK stream provides tool.call/result/text_delta for the activity rail. Build the
+ UI against this contract + demo.ts replay first, then wire the real agent.
+
+ ---
+ Backend: Claude Agent SDK integration (grounded in current docs)
+
+ Package: @anthropic-ai/claude-agent-sdk (v0.3.x, Node ≥18). Docs: code.claude.com/docs/en/agent-sdk/typescript.
+
+ const q = query({
+   prompt: inbox.stream(),                 // streaming-input async generator (continuous chat)
+   options: {
+     model: "claude-opus-4-8",
+     effort: "max",                        // first-class option; thinking stays adaptive
+     thinking: { type: "adaptive" },
+     includePartialMessages: true,         // text deltas → SSE
+     settingSources: [],                   // controlled backend; don't auto-load FS config
+     systemPrompt: PROCUREMENT_SYSTEM_PROMPT,
+     mcpServers: { app: appServer },       // in-process custom tools
+     allowedTools: ["mcp__app__*", "WebSearch", "WebFetch", "Agent", "AskUserQuestion"],
+     agents: SUBAGENTS,                    // supplier-scout ×N
+     canUseTool,                           // AskUserQuestion → UI; auto-allow our tools
+     maxTurns: 60,
+     maxBudgetUsd: 5,                      // safety rail
+   },
+ });
+ - Continuous chat: keep one long session; push new user messages into an async push-queue (inbox) yielded as SDKUserMessage; call q.interrupt() to make the agent react immediately to a steering message. (Report §7.)
+ - Streaming → events: iterate q; map system/init→agent.ready, stream_event text_delta→agent.text_delta, assistant tool_use→tool.call, user tool_result→tool.result, result→done. Tag anything with parent_tool_use_id as subagent activity. (Report
+ §6.)
+ - Custom tools: createSdkMcpServer({ name:"app", tools:[ tool("add_supplier", …, zodSchema, handler), … ] }); each handler does the real work and emits a bus event. Reference via mcp__app__<tool>. (Report §5.)
+ - AskUserQuestion: built-in; intercept in canUseTool when toolName==="AskUserQuestion" → render choices in UI → return the user's pick in updatedInput.answers. (Report §8.)
+ - Auth: no API key in env → SDK uses logged-in claude creds automatically. For robustness/containers: claude setup-token once → set CLAUDE_CODE_OAUTH_TOKEN. (Contractual note: claude.ai-login is fine for an internal/demo build; a shipped
+ product for external users would need ANTHROPIC_API_KEY. Report §4.)
+
+ Subagent "swarm": define supplier-scout (description, prompt = "search the web for suppliers of , return vendors w/ contact", tools: ["WebSearch","WebFetch","mcp__app__add_supplier"], model:"opus" or "sonnet", effort:"high"). Orchestrator
+ spawns several in parallel (per region/category) via the Agent tool → multiple lanes light up in the activity rail at once. Each scout calls add_supplier → cards stream in.
+
+ ---
+ Telephony: the live phone call (hero) — via Vapi (verified against docs.vapi.ai)
+
+ Chosen path: Vapi orchestrates the whole real-time pipeline (telephony, STT, turn-taking, barge-in, streaming TTS); we keep Claude as the call brain and ElevenLabs as the voice. Use @vapi-ai/server-sdk to place calls + create the assistant;
+ handle webhooks as raw Hono (parse JSON, import SDK types only). Cost: ~free ($10 signup credit; all-in ≈ $0.15–0.40/min — budget test calls).
+
+ - Vapi assistant (create once, reuse by id): vapi.assistants.create({ model:{ provider:'anthropic', model:<claude id>, messages:[{role:'system', content: NEGOTIATION_PROMPT with {{vars}}}], tools:[report_quote] }, voice:{ provider:'11labs',
+ voiceId }, firstMessage, analysisPlan:{ structuredDataSchema } }).
+   - Claude model: Vapi's Anthropic list lags Anthropic releases — confirmed-good claude-sonnet-4-20250514 (or claude-opus-4-20250514); pick the newest Claude shown in the dashboard at build time. (This is the call brain; our orchestrator stays
+ claude-opus-4-8.)
+   - Keys: ElevenLabs is BYO — add ELEVENLABS_API_KEY in Vapi Dashboard → Integrations (voiceId resolves after). Anthropic can be Vapi-managed (pay via credits — fastest) or BYO.
+   - Structured quote at call end: set analysisPlan.structuredDataSchema ({ unitPrice, currency, leadTimeDays, agreed }) so the end-of-call report returns a parsed quote (analysis is computed a few seconds after hangup).
+ - report_quote function tool: { type:'function', function:{ name:'report_quote', parameters:{ unitPrice, leadTimeDays, moq?, notes? } }, server:{ url:<our>/webhooks/vapi } }. Mid-call Vapi POSTs a tool-calls message; our server must reply with
+ the exact shape { results:[{ toolCallId, result:"<string>" }] } (else the model hangs).
+ - call_supplier tool (agent-invoked): vapi.calls.create({ assistant:{ assistantId }, phoneNumberId, customer:{ number }, assistantOverrides:{ variableValues:{ supplier, part, qty, target_price, walk_away, lead_time } } }). Emit call.ringing
+ immediately; keep a Map<call.id, resolve> of pending calls; resolve the tool's promise on end-of-call-report (return transcript + structured quote), using the live report_quote args as a fallback.
+ - Webhooks (Vapi → POST /webhooks/vapi, verify x-vapi-secret): status-update (queued/ringing/in-progress/ended → call.*) · transcript (role + partial/final → call.transcript) · tool-calls report_quote → call.quote + update_quote (and reply
+ with results) · end-of-call-report (artifact.transcript/messages/recordingUrl + analysis.summary/structuredData → resolve the call promise). Host the webhook near us-west-2; respond < ~6s.
+ - Number: Vapi-provisioned US number (POST /phone-number {provider:'vapi', numberDesiredAreaCode}) — no Twilio trial friction, but US-only + a daily free-call cap; BYO Twilio for non-US or volume.
+ - Negotiation policy lives in the assistant's system prompt (Claude reacts per turn); the orchestrator only sets the envelope via variableValues.
+ - Demo fallbacks (pre-stage): call a teammate's phone as "the supplier"; keep a pre-recorded two-voice audio + canned call.quote played through the CallPanel (visually identical); do one real test call before stage.
+ - Backend deps: @vapi-ai/server-sdk (calls + types); raw Hono for the webhook receiver.
+
+ ---
+ Email RFQs
+
+ - Send (real): Nodemailer via Gmail App Password (fast) — send_rfq_email tool composes + sends to controlled supplier inboxes, emits email.sent. (Alt: Resend if a key is handy.)
+ - Replies: optional check_email_replies via IMAP (imapflow) polling; if flaky for a live demo, simulate 1–2 inbound quotes (pre-staged) so the board keeps filling. Mark clearly in demo.ts.
+
+ "Order Now" (simulated finale)
+
+ Button → POST /order → backend builds a polished invoice + "Paid" receipt object (no charge), emits order.placed then order.receipt. Optionally inject a user message so the agent confirms in chat. The satisfying finale (confetti/receipt) is
+ detailed in the UI section.
+
+ ---
+ UI & Live-Showcase Design
+
+ Aesthetic verdict: clean professional light theme — a trustworthy enterprise procurement console (Linear / Stripe / Mercury / Attio in light mode), built as a proper app shell with a persistent left navigation sidebar. Calm, white,
+ high-clarity; color used sparingly for status + the primary action. Brand personality carried by custom SVG (logo, agent glyphs, voice orb, empty states), not stock icons. Two showpieces still anchor it: the live agent swarm graph and the call
+ panel synced to the RFQ board.
+
+ 1. Visual identity
+
+ Light, professional, white-surface. White cards on a soft off-white app background; hairline gray borders; ink text; one confident brand accent (blue) for primary actions + the active nav item; status colors used sparingly. Fonts: Geist (UI) +
+ Geist Mono (all data — prices, lead-times, supplier names, the activity log; mono-on-data keeps the "instrument" precision even on white). Depth on white = hairline borders + soft layered shadows (no heavy drop-shadows, no glassmorphism);
+ optional faint dotted-grid behind the swarm graph. Motion = near-critically-damped springs, never bouncy; honor useReducedMotion().
+
+ Custom SVG (the key to "professional clean"): design a small in-house set — wordmark + logomark; the four agent glyphs (web / call / email / quote) reused as swarm-graph nodes and status icons; one empty-state illustration; an animated
+ "thinking" mark. Use lucide-react only for generic chrome (chevrons, close, gear); all brand / hero / node art is custom SVG.
+
+ Hard anti-slop rules: NO indigo→purple gradients; NO glassmorphism; NO three-icon marketing grid; NO pure #000 on pure #fff (ink #0F172A on #FFFFFF/#F7F8FA); one accent per region; color only on active/live state + primary action.
+
+ @theme { /* Tailwind v4 — light professional; paste into index.css */
+   --color-app:#F7F8FA; --color-surface:#FFFFFF; --color-sidebar:#FFFFFF; --color-elevated:#FFFFFF;
+   --color-border:#E5E7EB; --color-border-strong:#D1D5DB; --color-hover:#F1F5F9;
+   --color-ink:#0F172A; --color-muted:#64748B; --color-faint:#94A3B8;
+   --color-brand:#2563EB; --color-brand-hover:#1D4ED8; --color-brand-tint:#EFF4FF;
+   --color-web:#2563EB; --color-call:#D97706; --color-email:#7C3AED; --color-quote:#059669;
+   --color-success:#059669; --color-warn:#D97706; --color-danger:#DC2626; --color-live:#2563EB;
+   --font-sans:"Geist",ui-sans-serif,system-ui; --font-mono:"Geist Mono",ui-monospace;
+   --radius:12px;
+   --shadow-card:0 1px 2px rgb(16 24 40/.06),0 1px 3px rgb(16 24 40/.10);
+   --shadow-pop:0 10px 24px -8px rgb(16 24 40/.18),0 2px 6px rgb(16 24 40/.08);
+   --ring-live:0 0 0 1px #2563EB,0 0 0 4px #2563EB22; /* call panel active ring */
+ }
+
+ 2. Screen layout (professional app shell — left nav · center work area · right activity)
+
+ Persistent left sidebar nav (white, hairline right border, custom-SVG logo + nav items, brand-tint highlight on the active item) · white top bar holding the command bar · center work area (headline metrics → swarm graph → RFQ board; call panel
+ slides up over the board) · right live activity panel (collapsible). Desktop-first (judges watch on a big screen).
+ ┌──────────────┬──────────────────────────────────────────────┬───────────────┐
+ │ ◆ Atlas      │  ⌘ "50 brushless motors by Fri <€60/unit" [Run]│ LIVE ACTIVITY │ white top bar
+ │ (SVG logo)   ├──────────────────────────────────────────────┤ ● searching…  │
+ │ ◇ New RFQ    │  €412 SAVED · ✅ within budget · 4 quotes      │ ▸ calling Acme│ NumberFlow
+ │ ▦ Dashboard  │  ┌ SWARM GRAPH (custom-SVG nodes) ───────────┐ │ ✓ quote Bolt  │
+ │ ☎ Calls      │  │  scouts ─ ◉ Officer ─▶ 📞 call (pulsing)  │ │ ToolCard      │
+ │ ⊞ Suppliers  │  └───────────────────────────────────────────┘ │ state-machine │
+ │ ⚙ Settings   │  RFQ BOARD  ┌────┐┌────┐┌★WIN┐┌────┐          │ stack         │
+ │              │  ┌ CALL PANEL (slides up while calling) ─────┐ │               │
+ │ ── ───────   │  │ VoiceOrb · transcript · ▼€4 quote callout │ │               │
+ │ agent ● live │  └───────────────────────────────────────────┘ │               │
+ │              │                                  [ ⚡ Order Now ]│               │
+ └──────────────┴──────────────────────────────────────────────┴───────────────┘
+ Active nav item = brand-tint background + brand left-border. Below lg: sidebar collapses to an icon rail; the right activity panel becomes a slide-over Sheet.
+
+ 3. Live agent-activity showcase (centerpiece)
+
+ Two synchronized views of one SSE stream: (a) swarm graph (spatial "who's working now"), (b) activity panel (right side — chronological tool-call log).
+ - Critical keying rule: key every card/node by toolCallId, never array index — under parallelism a tool.result can arrive before its tool.call. Mutate the existing card; never duplicate.
+ - Swarm graph — @xyflow/react v12, radial layout, center = "Procurement Officer", rendered with the custom-SVG agent glyphs as nodes on a faint dotted-grid. Each subagent spawn = addNodes + an animated:true edge so a thin brand-blue dashed
+ line flows outward. Node color by job (tokens): web=brand #2563EB, call=amber #D97706 (pulsing, promoted to hero), email=violet #7C3AED, quote=emerald #059669. (Inspired by Manus "wide research".)
+ - ToolCard state machine (4 states): pending (gray dashed ring) → running (brand ring + light shimmer until tool.result) → done (emerald check, shimmer collapses to result) → failed (red).
+
+ Event → render map (the UI contract made visual):
+
+ ┌───────────────────────────────┬──────────────────────────────────────────────────────────┬────────────────────────────────────────┐
+ │             Event             │                      Activity rail                       │              Swarm graph               │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ searching web                 │ blue shimmer card, magnifier                             │ spawn blue child + animated edge       │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ rfq.supplier_added            │ shimmer→solid, name counts into board                    │ node settles                           │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ subagent.spawned              │ "spawned worker N"                                       │ new node radiates out                  │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ call.ringing/connected        │ amber hero card                                          │ node enlarges → radar pulse            │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ call.transcript (negotiating) │ transcript bubbles stream (typewriter); price ticks down │ hero node pulses                       │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ email.sent                    │ violet paper-plane slide-out, ✓                          │ violet node                            │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ rfq.supplier_updated (quote)  │ emerald flash                                            │ node→emerald; board card springs in    │
+ ├───────────────────────────────┼──────────────────────────────────────────────────────────┼────────────────────────────────────────┤
+ │ question.ask                  │ card lifts + glow border, swarm visually halts           │ renders AskUserQuestion choices inline │
+ └───────────────────────────────┴──────────────────────────────────────────────────────────┴────────────────────────────────────────┘
+
+ 4. RFQ comparison board
+
+ Card grid (not a table) — 3–6 vendor cards read as "agents in parallel." Status lifecycle (color + icon, never color alone): discovered slate ◌ → emailing amber ✉ (pulsing) → calling violet 📞 (ring + breathing glow, pulls to front) → quoted
+ sky ✓ → negotiating indigo ↻ (price delta animates) → WON emerald ★ (scale 1.04, confetti) → lost zinc (60% opacity).
+ ┌──────────────────────────────┐
+ │ Bolt Industrial      [📞 ●]  │  name + live status badge
+ │ Berlin · ★4.6 · MOQ 25       │  meta
+ │  €62 ─────▶ €58   ▼ €4       │  initial→negotiated, delta count-up (HERO cell)
+ │  ▓▓▓▓▓▓▓▓░░  lead: Fri ✓     │  progress + lead-time chip
+ │  "covers shipping"           │  latest agent note (text delta)
+ └──────────────────────────────┘
+ - Auto-populate / price-delta: card springs in via AnimatePresence mode="popLayout" + layout (existing cards reflow). Price via @number-flow/react (or useSpring+useTransform), Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR'}),
+ tabular-nums. Strike old price, count up the ▼ €4 delta.
+ - Winner: shared layoutId morphs the WON card to the front; emerald border + breathing glow.
+ - Order Now finale: sticky full-width brand button → Motion layout morph button→spinner→check → canvas-confetti (disableForReducedMotion:true) → slide-up receipt card (winner, €/unit, total, lead-time, "Payment simulated · PO-2026-0421", green
+ check). The receipt is the memory anchor.
+
+ 5. Cinematic phone-call panel
+
+ Library: react-ai-voice-visualizer (MIT, TS, 60fps) — decisive because its orb accepts a plain volume number and animates without real client-side audio, exactly solving our "no browser audio stream" problem. (Skip the ElevenLabs 3D Three.js
+ orb — heavier.)
+ - Flow: Ringing (3 concentric rings pulse + "Dialing…"; panel brand --ring-live on) → Connected (orb→listening, status pill flips green via layout spring, timer starts) → Speaking (orb color-codes speaker: AI brand-blue, supplier amber; white
+ panel, orb tuned for light bg) → two-speaker transcript bubbles (AnimatePresence+layout, typewriter per SSE delta, autoscroll gated near-bottom) → quote callout (old price strikes, new counts up, green glow + "▼ €8/unit").
+ - Weld A↔B: mirror the same MotionValue into the matching RFQ board cell so phone and dashboard animate in sync — the signature moment.
+ - Fake amplitude (we only have transcript timing, not audio): while isSpeaking, amp = noise1D(t)*(0.6+0.4*rand()) fast-attack ~40ms / slow-decay ~180ms; idle ~0.05–0.12. Feed amp into volume + noise speed. (Perlin, not pure random — random
+ looks robotic.)
+
+ 6. Tech stack & libraries
+
+ Verified on npm 2026-06-07 (all peer React 19). Scaffold:
+ npm create vite@latest client -- --template react-ts && cd client && npm install
+ npm install tailwindcss@4 @tailwindcss/vite && npm install -D @types/node
+ npm install motion cmdk sonner lucide-react recharts @xyflow/react \
+   @number-flow/react react-ai-voice-visualizer canvas-confetti zustand
+ # index.css → @import "tailwindcss"; @import "tw-animate-css";  (+ the @theme block above)
+ # vite.config → plugins:[react(), tailwindcss()], alias "@"→./src
+ # tsconfig.json AND tsconfig.app.json → baseUrl "." + paths {"@/*":["./src/*"]}
+ npx shadcn@latest init    # new-york style
+ npx shadcn@latest add button card dialog command sonner badge tabs skeleton tooltip progress sheet
+
+ ┌───────────────────────────────────┬──────────────────────────────────────────────────────────────────────┐
+ │                Lib                │                                 Why                                  │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ tailwindcss@4 + @tailwindcss/vite │ First-party Vite plugin, theme in @theme{} (no tailwind.config.js).  │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ shadcn (new-york)                 │ Copy-in components you own; first-class Vite+v4+React19 path.        │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ motion                            │ (renamed framer-motion; import motion/react) drives every animation. │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ @xyflow/react@12                  │ The swarm graph — win-condition A. Import its CSS after Tailwind.    │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ react-ai-voice-visualizer         │ Voice orb driven by a volume prop — no real audio needed.            │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ @number-flow/react                │ Rolling-digit counters for €/unit + savings — high wow/min.          │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ cmdk                              │ Command-bar hero (Command.List mandatory).                           │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ sonner                            │ toast.promise() wired to SSE call events.                            │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ recharts@3 (= shadcn charts)      │ Savings/price chart.                                                 │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ canvas-confetti                   │ Order Now finale.                                                    │
+ ├───────────────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+ │ zustand                           │ Single batched store fed by the rAF-flushed SSE buffer.              │
+ └───────────────────────────────────┴──────────────────────────────────────────────────────────────────────┘
+
+ SKIP under time pressure: Tremor (fights the palette, +200kB); 3D/Three.js orb; Aceternity/MagicUI 3D backgrounds (copy at most ONE hero background); vaul (use shadcn Sheet). Gotchas: tailwindcss-animate is dead → use tw-animate-css; shadcn
+ toast deprecated → sonner; cmdk filters case-sensitively since 1.0.
+
+ 7. Animation cookbook
+
+ Transport foundation (prevents render storms): native EventSource on a runId → buffer events in a ref → flush once per requestAnimationFrame into one batched Zustand set() (Zustand doesn't auto-batch outside React handlers) → granular per-zone
+ selectors. Hono streamSSE with a 15s heartbeat.
+ 1. Card insert — AnimatePresence mode="popLayout" initial={false} + layout; initial={{opacity:0,y:24,scale:.97}}, spring {stiffness:380,damping:30} (rows in forwardRef).
+ 2. Number ticker — @number-flow/react, or useSpring(v,{stiffness:75,damping:15,mass:.8})+useTransform; tabular-nums.
+ 3. Status change — animate boxShadow/borderColor between tokens 200–300ms; winner morphs via shared layoutId.
+ 4. Thinking/running — .shimmer sweep on running cards + swarm node ring until tool.result.
+ 5. Transcript autoscroll — sentinel scrollIntoView({behavior:'smooth'}) gated on scrollHeight-scrollTop-clientHeight<80.
+ 6. Call orb radar — concentric rings + amp→volume/noise speed + brand panel ring.
+
+ Wrap app in <LazyMotion features={domAnimation} strict> + use m.* (bundle ~34kb→~4.6kb).
+
+ ---
+ Environment / prerequisites (user-provided)
+
+ - .env: VAPI_API_KEY, VAPI_ASSISTANT_ID, VAPI_PHONE_NUMBER_ID, VAPI_WEBHOOK_SECRET, ELEVENLABS_API_KEY (added in Vapi Dashboard → Integrations), TWILIO_* (only if BYO number into Vapi), GMAIL_USER, GMAIL_APP_PASSWORD, (optional
+ OPENAI_API_KEY).
+ - Vapi assistant created (LLM = Claude, voice = ElevenLabs, system prompt = negotiation policy, report_quote function tool → our server URL) + a phone number attached (Vapi-provisioned number recommended — no Twilio trial friction; or BYO
+ Twilio).
+ - A public webhook URL for Vapi → backend (ngrok reserved/static domain, or deploy).
+     - Vapi assistant created (LLM = Claude, voice = ElevenLabs, system prompt = negotiation policy, report_quote function tool → our server URL) + a phone number attached (Vapi-provisioned number recommended — no Twilio trial friction; or BYO
+     Twilio).
+     - A public webhook URL for Vapi → backend (ngrok reserved/static domain, or deploy).
+     - claude CLI logged in (already ✓).
+
+     Verification (end-to-end, no costly side-effects)
+
+     1. UI-first against mock: build the client against demo.ts replay + the shared event types — full flashy run with zero external calls. This is also the demo-safe fallback.
+     2. Agent: start server, POST /command a test query; confirm agent.ready shows model: claude-opus-4-8 + apiKeySource; watch tool.call/rfq.* events via curl -N /events.
+     3. Web search swarm: confirm parallel supplier-scout subagents emit subagent.spawned + add_supplier.
+     4. Email: send one real RFQ to a controlled inbox; verify email.sent.
+     5. Voice (Vapi): one real test call to a teammate's phone before stage (not mass dialing); verify call.* webhook events + returned quote; keep the pre-recorded fallback ready.
+     6. Order: click Order Now → verify order.receipt + finale.
+
+     Risks & fallbacks
+
+     - Live call flaky → Vapi-provisioned number + teammate phone / pre-recorded audio CallPanel.
+     - Web search slow/empty → curated fallback supplier list seeded into a scout.
+     - Email replies unreliable → simulate inbound quotes.
+     - Agent drift / latency → tight system prompt, maxTurns, effort tuned, and demo.ts canned mode as the guaranteed-good stage run.
+     - Trailing-space working dir → always quote "/Users/mac/Downloads/Digithon ".
+
+     Build order (tiered — demo-safe core first, everything degrades gracefully)
+
+     Tier 1 — DEMO-SAFE CORE (must run on a scripted mock stream, zero external deps). This alone is a complete "wow" demo even if everything else slips.
+     1. Scaffold client+server workspaces; light theme tokens + Geist fonts + the app shell (left-nav sidebar, white top bar, right activity panel) + custom-SVG logo/glyphs; server/src/events.ts shared event union.
+     2. server/src/demo.ts mock SSE emitter that replays a scripted run (search→email→call→quotes→win) + Hono streamSSE /events. Build this safety net early.
+     3. Client useAgentStream hook: EventSource → ref-buffer → rAF flush → Zustand.
+     4. Command bar (cmdk) → POST /command → open stream.
+     5. Activity rail + ToolCard state machine (pending/running/done + shimmer).
+     6. RFQ board cards with AnimatePresence+layout insert + @number-flow price.
+     7. Order Now → confetti → receipt card.
+
+     Tier 2 — HERO LAYER (the two showpieces; highest wow/hour).
+     8. Swarm graph (@xyflow/react, animated edges, node-color-by-job, hero-node enlarge).
+     9. Phone-call panel (react-ai-voice-visualizer + fake amplitude + streaming transcript + quote callout mirrored into the board cell).
+
+     Tier 3 — REAL AGENT (swap mock → live).
+     10. Wire query() session + in-process custom tools + supplier-scout subagents; map the SDK message stream to the event bus; confirm agent.ready shows claude-opus-4-8.
+
+     Tier 4 — REAL SIDE-EFFECTS.
+     11. Vapi outbound call + webhooks (call_supplier); Gmail send (send_rfq_email); AskUserQuestion round-trip (inline choices + swarm-halt).
+
+     Tier 5 — POLISH (cut first if behind).
+     12. Savings chart (Recharts), sonner toast.promise on call, winner layoutId morph, reduced-motion pass, responsive collapse, sound, backup demo video.
+
+     ▎ Demo-safe line: Tiers 1–2 (items 1–9) must run from the scripted mock with no live backend. Always keep the mock-replay path wired so a flaky live Twilio / web-search call can't sink the on-stage demo.
