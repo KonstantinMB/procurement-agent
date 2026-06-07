@@ -180,7 +180,8 @@ export function createAppServer(ctx: RunContext) {
 
           // Stream: rows + the research agent's searches appear live as it explores.
           const all = await runClaudeResearch(
-            { item, quantity, region, targetPrice, currency, count },
+            // Time-boxed demo: cap discovery at 2–3 suppliers no matter what the model asks for.
+            { item, quantity, region, targetPrice, currency, count: Math.min(count ?? 3, 3) },
             {
               onSupplier: addOne,
               onActivity: (act) => {
@@ -329,16 +330,38 @@ export function createAppServer(ctx: RunContext) {
           // events key off this id, so a name→row mismatch here is exactly what
           // used to leave the called supplier stuck on "Discovered".
           const vendor = ensureVendor(ctx, vendorId);
+
+          // Arm the call with our strongest lever: the lowest quote already on the
+          // board from ANY other supplier. The voice assistant cites it verbatim to
+          // push the price down (NEGOTIATION_PROMPT {{benchmarks}}).
+          const competing = state
+            .all()
+            .filter((v) => v.id !== vendor.id)
+            .map((v) => ({
+              name: v.name,
+              price: v.negotiatedPrice ?? v.initialPrice,
+              currency: v.currency ?? state.request?.currency ?? "EUR",
+            }))
+            .filter((q): q is { name: string; price: number; currency: string } => q.price != null)
+            .sort((a, b) => a.price - b.price);
+          const cheapest = competing.length ? competing[0] : undefined;
+          const benchmarks = cheapest
+            ? `${cheapest.price} ${cheapest.currency}/unit from ${cheapest.name}` +
+              (competing.length > 1 ? ` (lowest of ${competing.length} competing quotes)` : "")
+            : undefined;
+
           const res = await callSupplier(
             {
               vendorId: vendor.id,
               vendorName: vendor.name,
               phone: vendor.contact?.phone ?? "",
               goal: goal ?? state.request?.item ?? "negotiate a quote",
+              quantity: state.request?.quantity,
               targetPrice,
               walkAway,
               leadTimeDays,
               currency: vendor.currency ?? state.request?.currency ?? "EUR",
+              benchmarks,
             },
             ctx,
           );

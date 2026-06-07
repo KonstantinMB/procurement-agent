@@ -22,7 +22,7 @@ Use the built-in **WebSearch** tool DIRECTLY: search for real suppliers/distribu
 - \`moq\` (an estimate if not stated)
 - an **estimated unit price** (\`unitPrice\`, a number) — the public/list price if visible, otherwise your best market estimate from the results. ALWAYS pass a number; it fills the "Est. price" column, so never leave it blank.
 
-Add each supplier as you go — don't wait, and don't open every page. Aim for 4–6 suppliers from just one or two searches. (\`mcp__app__research_suppliers\` is a slower fallback, only if WebSearch is unavailable; if you do use it, take the **exact vendor ids** it returns and use them verbatim later for \`call_supplier\` / \`update_quote\` — never invent or guess ids.) **Never invent suppliers** — only real, web-found companies belong on the table.
+Add each supplier as you go — don't wait, and don't open every page. Aim for just **2–3 suppliers** from a single search — this is a fast, time-boxed demo, so keep the list short and move on quickly. (\`mcp__app__research_suppliers\` is a slower fallback, only if WebSearch is unavailable; if you do use it, take the **exact vendor ids** it returns and use them verbatim later for \`call_supplier\` / \`update_quote\` — never invent or guess ids.) **Never invent suppliers** — only real, web-found companies belong on the table.
 
 One supplier is **already on your board** before you start: **${MOCK_SUPPLIER_NAME}**, a pre-approved in-network distributor reachable by **both email and a direct phone line**. It is not a web find — leave it in place, treat it as a real candidate, and note it is your designated **live-call** target in step 3.
 
@@ -41,7 +41,7 @@ export const SCOUT_PROMPT: string = `You are a **supplier-scout** subagent for P
 Method:
 1. Use **WebSearch** to find manufacturers, distributors, or B2B marketplaces for the item (bias toward the requested region if given).
 2. Use **WebFetch** on the best 2–4 results to confirm the company is real and to extract a contact **email** (published sales/procurement address, else the standard one for their domain, e.g. \`sales@theirdomain.com\`).
-3. For **each** real supplier (target 2–4), call **\`mcp__app__add_supplier\`** with: \`name\`, \`location\` (city, country), a contact \`email\`, a \`rating\` estimate (0–5), \`moq\` (estimate if unstated), and an **estimated** \`unitPrice\` (a number — the public/list price if shown, otherwise your best market estimate). Always include a \`unitPrice\`; it fills the "Est. price" column.
+3. For **each** real supplier (target **2–3**, no more — this is a time-boxed demo), call **\`mcp__app__add_supplier\`** with: \`name\`, \`location\` (city, country), a contact \`email\`, a \`rating\` estimate (0–5), \`moq\` (estimate if unstated), and an **estimated** \`unitPrice\` (a number — the public/list price if shown, otherwise your best market estimate). Always include a \`unitPrice\`; it fills the "Est. price" column.
 
 Rules: register only **real** suppliers you actually found evidence for — **no invented companies**. The unit price may be an informed estimate, but the company must be real. Do not email, call, or negotiate. When done, return **one line** naming who you added.`;
 
