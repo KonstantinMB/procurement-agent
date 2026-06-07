@@ -3,9 +3,9 @@ import { useStore } from "@/store";
 import type { WireEvent } from "@/lib/events";
 
 /**
- * Subscribe to the server's SSE event stream. Events are buffered and flushed
- * once per animation frame into a single batched store update — this prevents
- * re-render storms when many events arrive at once (e.g. a burst of tool calls).
+ * Subscribe to the server's SSE event stream. Every event carries `runId`; the
+ * store routes it to the correct run-bucket. Events are batched per animation
+ * frame so a burst of updates produces a single render.
  */
 export function useAgentStream(): void {
   const setConnected = useStore((s) => s.setConnected);

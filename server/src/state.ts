@@ -20,11 +20,24 @@ export function slugify(name: string): string {
  * order/summary logic.
  */
 export class RfqState {
+  readonly runId: string;
+  readonly createdAt: number;
+  title: string;
   request: RfqRequest | undefined;
   vendors = new Map<string, Vendor>();
+  ordered: { vendorId: string; invoice: Invoice } | undefined;
+  done = false;
+
+  constructor(runId = "", title = "New RFQ") {
+    this.runId = runId;
+    this.createdAt = Date.now();
+    this.title = title;
+  }
 
   setRequest(r: RfqRequest): void {
     this.request = r;
+    if (r.item) this.title = r.item;
+    else if (r.raw) this.title = r.raw.slice(0, 80);
   }
   upsertVendor(v: Vendor): void {
     this.vendors.set(v.id, v);
@@ -58,16 +71,11 @@ export class RfqState {
   all(): Vendor[] {
     return [...this.vendors.values()];
   }
-  reset(): void {
-    this.request = undefined;
-    this.vendors.clear();
-  }
 
   private priceOf(v: Vendor): number | undefined {
     return v.negotiatedPrice ?? v.initialPrice;
   }
 
-  /** Cheapest vendor that still meets the deadline (falls back to cheapest). */
   bestVendor(): Vendor | undefined {
     const priced = this.all().filter((v) => this.priceOf(v) != null);
     const onTime = priced
@@ -107,5 +115,15 @@ export class RfqState {
       status: "paid",
       date: new Date().toISOString(),
     };
+  }
+
+  /** Coarse status used by the RFQ list page. */
+  derivedStatus(): "researching" | "calling" | "quoted" | "ordered" | "done" {
+    if (this.ordered) return "ordered";
+    const list = this.all();
+    if (list.some((v) => v.status === "calling" || v.status === "negotiating")) return "calling";
+    if (list.some((v) => v.status === "won" || v.status === "quoted")) return "quoted";
+    if (this.done) return "done";
+    return "researching";
   }
 }

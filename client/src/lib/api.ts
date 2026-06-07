@@ -1,4 +1,5 @@
-// POST helpers — same-origin; Vite proxies /api → http://localhost:8787
+// POST/GET helpers — same-origin; Vite proxies /api → http://localhost:8787
+import type { RunSummary } from "@/lib/events";
 
 async function post(path: string, body?: unknown): Promise<any> {
   try {
@@ -13,15 +14,42 @@ async function post(path: string, body?: unknown): Promise<any> {
   }
 }
 
+async function getJson(path: string): Promise<any> {
+  try {
+    const r = await fetch(path);
+    return r.ok ? await r.json().catch(() => ({})) : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Start a NEW parallel run; resolves to the server-assigned runId. */
-export const startCommand = (text: string): Promise<{ runId?: string }> =>
-  post("/api/command", { text });
-export const sendChat = (runId: string, text: string) => post("/api/chat", { runId, text });
-export const answerQuestion = (id: string, answers: Record<string, string>) =>
-  post("/api/answer", { id, answers });
+export async function startCommand(text: string): Promise<string | undefined> {
+  const r = await post("/api/command", { text });
+  return typeof r?.runId === "string" ? r.runId : undefined;
+}
+
+export const sendChat = (runId: string, text: string) =>
+  post("/api/chat", { runId, text });
+
+export const answerQuestion = (
+  runId: string,
+  id: string,
+  answers: Record<string, string>,
+) => post("/api/answer", { runId, id, answers });
+
 export const placeOrder = (runId: string, vendorId: string) =>
   post("/api/order", { runId, vendorId });
+
 /** Remove a single run from the dashboard. */
 export const removeRun = (runId: string) => post("/api/run/remove", { runId });
-/** Global reset — abort and clear every run. */
-export const resetRun = () => post("/api/reset");
+
+/** Per-run reset when a runId is given, else a global dashboard reset. */
+export const resetRun = (runId?: string) =>
+  post("/api/reset", runId ? { runId } : undefined);
+
+/** Snapshot of every run, for the RFQs list page. */
+export async function listRuns(): Promise<RunSummary[]> {
+  const r = await getJson("/api/runs");
+  return Array.isArray(r?.runs) ? (r.runs as RunSummary[]) : [];
+}

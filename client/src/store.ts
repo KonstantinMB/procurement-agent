@@ -1,16 +1,39 @@
 import { create } from "zustand";
-import { removeRun as apiRemoveRun } from "@/lib/api";
 import type {
   AskQuestion,
   CallSpeaker,
   Invoice,
   RfqRequest,
+  RunSummary,
   ToolKind,
   ToolStatus,
   Vendor,
   WireEvent,
 } from "@/lib/events";
 
+export type ViewKey = "rfq" | "dashboard" | "calls" | "suppliers" | "settings";
+export type RailTab = "activity" | "assistant";
+
+const RAIL_WIDTH_KEY = "procura:rail-width";
+const RAIL_TAB_KEY = "procura:rail-tab";
+const VIEW_KEY = "procura:view";
+
+const RAIL_MIN = 320;
+const RAIL_MAX = 720;
+
+function readNumber(key: string, fallback: number): number {
+  if (typeof window === "undefined") return fallback;
+  const raw = window.localStorage.getItem(key);
+  const n = raw == null ? NaN : Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+function readString<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  const raw = window.localStorage.getItem(key);
+  return (allowed as readonly string[]).includes(raw ?? "") ? (raw as T) : fallback;
+}
+
+// ─── Per-run types ────────────────────────────────────────────────────────
 export interface ToolCallItem {
   id: string;
   name: string;
@@ -50,19 +73,30 @@ export interface Summary {
   withinBudget: boolean;
   quotes: number;
 }
+export interface ChatQuestion {
+  qid: string;
+  questions: AskQuestion[];
+  answered: boolean;
+  answers?: Record<string, string>;
+}
 export interface ChatMessage {
   id: number;
   role: "user" | "agent";
   text: string;
+  kind?: "text" | "question";
+  question?: ChatQuestion;
 }
 
-/** Everything that belongs to ONE run. The dashboard holds a map of these. */
-export interface RunSlice {
-  id: string;
+/** All per-run state in one bag — what an RFQ pipeline carries from start to finish. */
+export interface RunData {
+  runId: string;
+  title: string;
   createdAt: number;
-  request?: RfqRequest;
   running: boolean;
   thinking: boolean;
+  model?: string;
+  apiKeySource?: string;
+  request?: RfqRequest;
   status?: { phase: string; message?: string };
   toolCalls: Record<string, ToolCallItem>;
   toolOrder: string[];
@@ -77,21 +111,14 @@ export interface RunSlice {
   order?: { placed: boolean; invoice?: Invoice };
 }
 
-let _seq = 1;
-const nextSeq = () => _seq++;
+const initialCall: CallState = { active: false, phase: "idle", transcript: [] };
 
-// Stable empty references so the "no active run" mirror never triggers spurious
-// re-renders (zustand compares each selector's result by Object.is).
-const EMPTY_OBJ = Object.freeze({}) as Record<string, never>;
-const EMPTY_ARR = Object.freeze([]) as never[];
-const EMPTY_CALL: CallState = Object.freeze({ active: false, phase: "idle", transcript: [] });
-
-function freshSlice(id: string, createdAt: number, request?: RfqRequest): RunSlice {
+function newRunData(runId: string, title = "New RFQ"): RunData {
   return {
-    id,
-    createdAt,
-    request,
-    running: true,
+    runId,
+    title,
+    createdAt: Date.now(),
+    running: false,
     thinking: false,
     toolCalls: {},
     toolOrder: [],
@@ -99,32 +126,118 @@ function freshSlice(id: string, createdAt: number, request?: RfqRequest): RunSli
     subagentOrder: [],
     vendors: {},
     vendorOrder: [],
-    call: { active: false, phase: "idle", transcript: [] },
+    call: { ...initialCall, transcript: [] },
     chat: [],
     question: null,
   };
 }
 
-/** Pure per-run reducer: fold one event into one slice, returning a new slice. */
-function reduceSlice(slice: RunSlice, e: WireEvent): RunSlice {
-  switch (e.type) {
-    case "run.created":
-      return { ...slice, request: e.request, createdAt: e.createdAt, running: e.running };
-    case "agent.ready":
-      return { ...slice, running: true };
-    case "agent.thinking":
-      return { ...slice, thinking: e.active };
-    case "status":
-      return { ...slice, status: { phase: e.phase, message: e.message } };
-    case "agent.message":
-      return { ...slice, chat: [...slice.chat, { id: nextSeq(), role: "agent", text: e.text }] };
-    case "done":
-      return { ...slice, running: false, thinking: false };
+// ─── Top-level state — UI + a mirror of the current run for legacy selectors ──
+interface AppState {
+  connected: boolean;
+  runs: Record<string, RunData>;
+  runOrder: string[]; // newest-first
+  currentRunId?: string;
+  runSummaries: RunSummary[]; // from /api/runs
 
+  // Mirror of runs[currentRunId] — read these from components as before.
+  running: boolean;
+  thinking: boolean;
+  model?: string;
+  apiKeySource?: string;
+  request?: RfqRequest;
+  status?: { phase: string; message?: string };
+  toolCalls: Record<string, ToolCallItem>;
+  toolOrder: string[];
+  subagents: Record<string, SubagentItem>;
+  subagentOrder: string[];
+  vendors: Record<string, Vendor>;
+  vendorOrder: string[];
+  summary?: Summary;
+  call: CallState;
+  chat: ChatMessage[];
+  question: { id: string; questions: AskQuestion[] } | null;
+  order?: { placed: boolean; invoice?: Invoice };
+
+  // UI / nav
+  view: ViewKey;
+  railWidth: number;
+  railTab: RailTab;
+  setView: (v: ViewKey) => void;
+  setRailWidth: (n: number) => void;
+  setRailTab: (t: RailTab) => void;
+
+  setConnected: (c: boolean) => void;
+  setCurrentRunId: (id: string | undefined) => void;
+  ensureRun: (id: string, title?: string) => void;
+  setRunSummaries: (s: RunSummary[]) => void;
+  applyEvents: (events: WireEvent[]) => void;
+  pushChat: (role: "user" | "agent", text: string) => void;
+}
+
+let _seq = 1;
+const nextSeq = () => _seq++;
+
+/** Pick the fields a component reads — produces the "current run mirror". */
+function mirrorOf(r: RunData): Pick<
+  AppState,
+  | "running"
+  | "thinking"
+  | "model"
+  | "apiKeySource"
+  | "request"
+  | "status"
+  | "toolCalls"
+  | "toolOrder"
+  | "subagents"
+  | "subagentOrder"
+  | "vendors"
+  | "vendorOrder"
+  | "summary"
+  | "call"
+  | "chat"
+  | "question"
+  | "order"
+> {
+  return {
+    running: r.running,
+    thinking: r.thinking,
+    model: r.model,
+    apiKeySource: r.apiKeySource,
+    request: r.request,
+    status: r.status,
+    toolCalls: r.toolCalls,
+    toolOrder: r.toolOrder,
+    subagents: r.subagents,
+    subagentOrder: r.subagentOrder,
+    vendors: r.vendors,
+    vendorOrder: r.vendorOrder,
+    summary: r.summary,
+    call: r.call,
+    chat: r.chat,
+    question: r.question,
+    order: r.order,
+  };
+}
+
+const emptyMirror = mirrorOf(newRunData("__empty__"));
+
+/** Reducer over one run for one event (everything except agent.text_delta). */
+function applyOne(r: RunData, e: WireEvent): RunData {
+  switch (e.type) {
+    case "agent.ready":
+      return { ...r, model: e.model, apiKeySource: e.apiKeySource, running: true };
+    case "agent.thinking":
+      return { ...r, thinking: e.active };
+    case "status":
+      return { ...r, status: { phase: e.phase, message: e.message } };
+    case "agent.message":
+      return { ...r, chat: [...r.chat, { id: nextSeq(), role: "agent", text: e.text }] };
+    case "done":
+      return { ...r, running: false, thinking: false };
     case "tool.call": {
-      if (e.name === "mcp__app__set_request") return slice; // header-only, not feed noise
       const toolCalls = {
-        ...slice.toolCalls,
+        ...r.toolCalls,
         [e.id]: {
           id: e.id,
           name: e.name,
@@ -135,52 +248,41 @@ function reduceSlice(slice: RunSlice, e: WireEvent): RunSlice {
           seq: nextSeq(),
         },
       };
-      const toolOrder = slice.toolOrder.includes(e.id)
-        ? slice.toolOrder
-        : [...slice.toolOrder, e.id];
-      return { ...slice, toolCalls, toolOrder };
+      const toolOrder = r.toolOrder.includes(e.id) ? r.toolOrder : [...r.toolOrder, e.id];
+      return { ...r, toolCalls, toolOrder };
     }
     case "tool.result": {
-      const t = slice.toolCalls[e.id];
-      if (!t) return slice;
-      return {
-        ...slice,
-        toolCalls: { ...slice.toolCalls, [e.id]: { ...t, status: e.status, summary: e.summary } },
-      };
+      const prev = r.toolCalls[e.id];
+      if (!prev) return r;
+      return { ...r, toolCalls: { ...r.toolCalls, [e.id]: { ...prev, status: e.status, summary: e.summary } } };
     }
     case "subagent.spawned": {
-      const subagents = {
-        ...slice.subagents,
-        [e.id]: { id: e.id, role: e.role, parentId: e.parentId, done: false },
-      };
-      const subagentOrder = slice.subagentOrder.includes(e.id)
-        ? slice.subagentOrder
-        : [...slice.subagentOrder, e.id];
-      return { ...slice, subagents, subagentOrder };
+      const subagents = { ...r.subagents, [e.id]: { id: e.id, role: e.role, parentId: e.parentId, done: false } };
+      const subagentOrder = r.subagentOrder.includes(e.id) ? r.subagentOrder : [...r.subagentOrder, e.id];
+      return { ...r, subagents, subagentOrder };
     }
     case "subagent.done": {
-      const sa = slice.subagents[e.id];
-      if (!sa) return slice;
-      return { ...slice, subagents: { ...slice.subagents, [e.id]: { ...sa, done: true } } };
+      const prev = r.subagents[e.id];
+      if (!prev) return r;
+      return { ...r, subagents: { ...r.subagents, [e.id]: { ...prev, done: true } } };
     }
-
-    case "rfq.request":
-      return { ...slice, request: e.request };
+    case "rfq.request": {
+      const title = e.request.item ?? e.request.raw?.slice(0, 80) ?? r.title;
+      return { ...r, request: e.request, title };
+    }
     case "rfq.supplier_added": {
-      const vendors = { ...slice.vendors, [e.vendor.id]: e.vendor };
-      const vendorOrder = slice.vendorOrder.includes(e.vendor.id)
-        ? slice.vendorOrder
-        : [...slice.vendorOrder, e.vendor.id];
-      return { ...slice, vendors, vendorOrder };
+      const vendors = { ...r.vendors, [e.vendor.id]: e.vendor };
+      const vendorOrder = r.vendorOrder.includes(e.vendor.id) ? r.vendorOrder : [...r.vendorOrder, e.vendor.id];
+      return { ...r, vendors, vendorOrder };
     }
     case "rfq.supplier_updated": {
-      const v = slice.vendors[e.id];
-      if (!v) return slice;
-      return { ...slice, vendors: { ...slice.vendors, [e.id]: { ...v, ...e.patch } } };
+      const prev = r.vendors[e.id];
+      if (!prev) return r;
+      return { ...r, vendors: { ...r.vendors, [e.id]: { ...prev, ...e.patch } } };
     }
     case "rfq.summary":
       return {
-        ...slice,
+        ...r,
         summary: {
           headline: e.headline,
           savings: e.savings,
@@ -189,269 +291,217 @@ function reduceSlice(slice: RunSlice, e: WireEvent): RunSlice {
           quotes: e.quotes,
         },
       };
-
     case "call.ringing": {
-      const call: CallState = {
+      const call = {
         active: true,
         vendorId: e.vendorId,
         vendorName: e.vendorName,
-        phase: "ringing",
+        phase: "ringing" as const,
         transcript: [],
       };
-      const v = slice.vendors[e.vendorId];
-      const vendors = v
-        ? { ...slice.vendors, [e.vendorId]: { ...v, status: "calling" as const } }
-        : slice.vendors;
-      return { ...slice, call, vendors };
+      const prev = r.vendors[e.vendorId];
+      const vendors = prev ? { ...r.vendors, [e.vendorId]: { ...prev, status: "calling" as const } } : r.vendors;
+      return { ...r, call, vendors };
     }
     case "call.connected":
-      return { ...slice, call: { ...slice.call, active: true, phase: "connected" } };
+      return { ...r, call: { ...r.call, active: true, phase: "connected" } };
     case "call.transcript":
       return {
-        ...slice,
+        ...r,
         call: {
-          ...slice.call,
+          ...r.call,
           speaking: e.speaker,
           transcript: [
-            ...slice.call.transcript,
+            ...r.call.transcript,
             { id: nextSeq(), speaker: e.speaker, text: e.text, final: e.final },
           ],
         },
       };
     case "call.quote": {
       const call = {
-        ...slice.call,
+        ...r.call,
         quote: { unitPrice: e.unitPrice, currency: e.currency, leadTimeDays: e.leadTimeDays },
       };
-      const vid = slice.call.vendorId;
-      const v = vid ? slice.vendors[vid] : undefined;
+      const vid = call.vendorId;
+      const prev = vid ? r.vendors[vid] : undefined;
       const vendors =
-        vid && v
+        vid && prev
           ? {
-              ...slice.vendors,
+              ...r.vendors,
               [vid]: {
-                ...v,
+                ...prev,
                 negotiatedPrice: e.unitPrice,
                 currency: e.currency,
                 leadTimeDays: e.leadTimeDays,
                 status: "negotiating" as const,
               },
             }
-          : slice.vendors;
-      return { ...slice, call, vendors };
+          : r.vendors;
+      return { ...r, call, vendors };
     }
     case "call.ended":
-      return {
-        ...slice,
-        call: { ...slice.call, phase: "ended", active: false, outcome: e.outcome, speaking: undefined },
-      };
-
+      return { ...r, call: { ...r.call, phase: "ended", active: false, outcome: e.outcome, speaking: undefined } };
     case "email.sent": {
-      const v = slice.vendors[e.vendorId];
-      if (!v) return slice;
+      const prev = r.vendors[e.vendorId];
+      if (!prev) return r;
       return {
-        ...slice,
+        ...r,
         vendors: {
-          ...slice.vendors,
-          [e.vendorId]: { ...v, status: v.status === "discovered" ? "emailing" : v.status },
+          ...r.vendors,
+          [e.vendorId]: { ...prev, status: prev.status === "discovered" ? "emailing" : prev.status },
         },
       };
     }
     case "email.reply": {
-      const v = slice.vendors[e.vendorId];
-      if (!v) return slice;
+      const prev = r.vendors[e.vendorId];
+      if (!prev) return r;
       return {
-        ...slice,
+        ...r,
         vendors: {
-          ...slice.vendors,
+          ...r.vendors,
           [e.vendorId]: {
-            ...v,
+            ...prev,
             status: "quoted",
-            initialPrice: e.unitPrice ?? v.initialPrice,
-            negotiatedPrice: v.negotiatedPrice ?? e.unitPrice,
-            leadTimeDays: e.leadTimeDays ?? v.leadTimeDays,
+            initialPrice: e.unitPrice ?? prev.initialPrice,
+            negotiatedPrice: prev.negotiatedPrice ?? e.unitPrice,
+            leadTimeDays: e.leadTimeDays ?? prev.leadTimeDays,
           },
         },
       };
     }
-
     case "question.ask":
-      return { ...slice, question: { id: e.id, questions: e.questions } };
+      return { ...r, question: { id: e.id, questions: e.questions } };
     case "question.answered":
-      return { ...slice, question: null };
-
+      return { ...r, question: null };
     case "order.placed":
-      return { ...slice, order: { placed: true } };
+      return { ...r, order: { placed: true } };
     case "order.receipt":
-      return { ...slice, order: { placed: true, invoice: e.invoice } };
-
-    default:
-      return slice; // agent.text_delta, run.reset, run.removed handled in applyEvents
+      return { ...r, order: { placed: true, invoice: e.invoice } };
+    case "agent.text_delta":
+      return r;
+    // Run-lifecycle events are handled in applyEvents, not per-run here.
+    case "run.created":
+    case "run.removed":
+    case "run.reset":
+      return r;
   }
-}
-
-/** The flat per-run fields the detail components read — mirrored from the active run. */
-interface Mirror {
-  request?: RfqRequest;
-  running: boolean;
-  thinking: boolean;
-  status?: { phase: string; message?: string };
-  toolCalls: Record<string, ToolCallItem>;
-  toolOrder: string[];
-  subagents: Record<string, SubagentItem>;
-  subagentOrder: string[];
-  vendors: Record<string, Vendor>;
-  vendorOrder: string[];
-  summary?: Summary;
-  call: CallState;
-  chat: ChatMessage[];
-  question: { id: string; questions: AskQuestion[] } | null;
-  order?: { placed: boolean; invoice?: Invoice };
-}
-
-function mirrorOf(slice: RunSlice | undefined): Mirror {
-  return {
-    request: slice?.request,
-    running: slice?.running ?? false,
-    thinking: slice?.thinking ?? false,
-    status: slice?.status,
-    toolCalls: slice?.toolCalls ?? EMPTY_OBJ,
-    toolOrder: slice?.toolOrder ?? EMPTY_ARR,
-    subagents: slice?.subagents ?? EMPTY_OBJ,
-    subagentOrder: slice?.subagentOrder ?? EMPTY_ARR,
-    vendors: slice?.vendors ?? EMPTY_OBJ,
-    vendorOrder: slice?.vendorOrder ?? EMPTY_ARR,
-    summary: slice?.summary,
-    call: slice?.call ?? EMPTY_CALL,
-    chat: slice?.chat ?? EMPTY_ARR,
-    question: slice?.question ?? null,
-    order: slice?.order,
-  };
-}
-
-interface AppState extends Mirror {
-  connected: boolean;
-  model?: string;
-  apiKeySource?: string;
-
-  // multi-run
-  runs: Record<string, RunSlice>;
-  runOrder: string[];
-  activeRunId: string | null;
-  view: "dashboard" | "run";
-
-  // actions
-  applyEvents: (events: WireEvent[]) => void;
-  pushChat: (role: "user" | "agent", text: string) => void;
-  setConnected: (c: boolean) => void;
-  reset: () => void;
-  openRun: (runId: string, requestRaw?: string) => void;
-  setActiveRun: (runId: string) => void;
-  showDashboard: () => void;
-  closeRun: (runId: string) => void;
 }
 
 export const useStore = create<AppState>()((set) => ({
   connected: false,
   runs: {},
   runOrder: [],
-  activeRunId: null,
-  view: "dashboard",
-  ...mirrorOf(undefined),
+  currentRunId: undefined,
+  runSummaries: [],
+
+  ...emptyMirror,
+
+  view: readString<ViewKey>(VIEW_KEY, ["rfq", "dashboard", "calls", "suppliers", "settings"], "rfq"),
+  railWidth: Math.min(RAIL_MAX, Math.max(RAIL_MIN, readNumber(RAIL_WIDTH_KEY, 380))),
+  railTab: readString<RailTab>(RAIL_TAB_KEY, ["activity", "assistant"], "activity"),
+
+  setView: (v) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(VIEW_KEY, v);
+    set({ view: v });
+  },
+  setRailWidth: (n) => {
+    const clamped = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(n)));
+    if (typeof window !== "undefined") window.localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
+    set({ railWidth: clamped });
+  },
+  setRailTab: (t) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(RAIL_TAB_KEY, t);
+    set({ railTab: t });
+  },
 
   setConnected: (c) => set({ connected: c }),
 
+  setCurrentRunId: (id) =>
+    set((s) => {
+      if (!id) return { currentRunId: undefined, ...emptyMirror };
+      const r = s.runs[id];
+      if (!r) return { currentRunId: id };
+      return { currentRunId: id, ...mirrorOf(r) };
+    }),
+
+  ensureRun: (id, title) =>
+    set((s) => {
+      if (s.runs[id]) return {};
+      const data = newRunData(id, title);
+      return {
+        runs: { ...s.runs, [id]: data },
+        runOrder: s.runOrder.includes(id) ? s.runOrder : [id, ...s.runOrder],
+      };
+    }),
+
+  setRunSummaries: (rs) => set({ runSummaries: rs }),
+
   pushChat: (role, text) =>
     set((s) => {
-      const rid = s.activeRunId;
-      const slice = rid ? s.runs[rid] : undefined;
-      if (!rid || !slice) return {};
-      const updated = { ...slice, chat: [...slice.chat, { id: nextSeq(), role, text }] };
-      return { runs: { ...s.runs, [rid]: updated }, chat: updated.chat };
-    }),
-
-  reset: () =>
-    set({ runs: {}, runOrder: [], activeRunId: null, view: "dashboard", ...mirrorOf(undefined) }),
-
-  openRun: (runId, requestRaw) =>
-    set((s) => {
-      const runs = { ...s.runs };
-      let runOrder = s.runOrder;
-      if (!runs[runId]) {
-        runs[runId] = freshSlice(runId, Date.now(), requestRaw ? { raw: requestRaw } : undefined);
-        runOrder = runOrder.includes(runId) ? runOrder : [...runOrder, runId];
-      }
-      return { runs, runOrder, activeRunId: runId, view: "run", ...mirrorOf(runs[runId]) };
-    }),
-
-  setActiveRun: (runId) =>
-    set((s) => ({ activeRunId: runId, view: "run", ...mirrorOf(s.runs[runId]) })),
-
-  showDashboard: () => set({ view: "dashboard" }),
-
-  closeRun: (runId) => {
-    void apiRemoveRun(runId);
-    set((s) => {
-      const runs = { ...s.runs };
-      delete runs[runId];
-      const runOrder = s.runOrder.filter((x) => x !== runId);
-      const activeRunId = s.activeRunId === runId ? null : s.activeRunId;
-      const view = s.activeRunId === runId ? "dashboard" : s.view;
-      return {
-        runs,
-        runOrder,
-        activeRunId,
-        view,
-        ...mirrorOf(activeRunId ? runs[activeRunId] : undefined),
+      const id = s.currentRunId;
+      if (!id) return {};
+      const prev = s.runs[id];
+      if (!prev) return {};
+      const updated: RunData = {
+        ...prev,
+        chat: [...prev.chat, { id: nextSeq(), role, text }],
       };
-    });
-  },
+      const runs = { ...s.runs, [id]: updated };
+      return { runs, ...mirrorOf(updated) };
+    }),
 
   applyEvents: (events) =>
     set((s) => {
-      const runs = { ...s.runs };
+      let runs = s.runs;
       let runOrder = s.runOrder;
-      let activeRunId = s.activeRunId;
-      let view = s.view;
-      const globalPatch: Partial<AppState> = {};
-
+      const touched = new Set<string>();
       for (const e of events) {
-        const rid = e.runId;
-
+        // Global reset: wipe every run.
         if (e.type === "run.reset") {
-          for (const k of Object.keys(runs)) delete runs[k];
+          runs = {};
           runOrder = [];
-          activeRunId = null;
-          view = "dashboard";
           continue;
         }
-        if (e.type === "agent.ready") {
-          globalPatch.model = e.model;
-          globalPatch.apiKeySource = e.apiKeySource;
-          globalPatch.connected = true;
-        }
-
-        if (!rid) continue; // truly global event (connection status) — nothing per-run
-
+        const id = e.runId;
+        if (!id) continue; // truly global event (e.g. connection status) — no run bucket
+        // Per-run removal.
         if (e.type === "run.removed") {
-          delete runs[rid];
-          runOrder = runOrder.filter((x) => x !== rid);
-          if (activeRunId === rid) {
-            activeRunId = null;
-            view = "dashboard";
+          if (runs[id]) {
+            runs = { ...runs };
+            delete runs[id];
+            runOrder = runOrder.filter((x) => x !== id);
+            touched.add(id);
           }
           continue;
         }
-
-        let slice = runs[rid];
-        if (!slice) {
-          slice = freshSlice(rid, Date.now());
-          runOrder = runOrder.includes(rid) ? runOrder : [...runOrder, rid];
+        let r = runs[id];
+        if (!r) {
+          r = newRunData(id);
+          runOrder = runOrder.includes(id) ? runOrder : [id, ...runOrder];
         }
-        runs[rid] = reduceSlice(slice, e);
+        // Run announced: seed request, timing, running flag, and a title.
+        if (e.type === "run.created") {
+          const title = e.request.item ?? e.request.raw.slice(0, 80);
+          r = { ...r, request: e.request, createdAt: e.createdAt, running: e.running, title };
+          runs = { ...runs, [id]: r };
+          touched.add(id);
+          continue;
+        }
+        const next = applyOne(r, e);
+        if (next !== r) {
+          runs = { ...runs, [id]: next };
+          touched.add(id);
+        }
       }
-
-      const active = activeRunId ? runs[activeRunId] : undefined;
-      return { ...globalPatch, runs, runOrder, activeRunId, view, ...mirrorOf(active) };
+      const partial: Partial<AppState> = { runs, runOrder };
+      const cur = s.currentRunId;
+      if (cur && !runs[cur]) {
+        // The current run was removed or reset away — fall back to the empty mirror.
+        partial.currentRunId = undefined;
+        Object.assign(partial, emptyMirror);
+      } else if (cur && touched.has(cur) && runs[cur]) {
+        Object.assign(partial, mirrorOf(runs[cur]!));
+      }
+      return partial;
     }),
 }));

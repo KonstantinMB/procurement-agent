@@ -7,6 +7,32 @@ import { runClaudeResearch } from "./research";
 import type { RunContext } from "./runs";
 import type { Vendor, VendorStatus } from "./events";
 
+const VALID_VENDOR_STATUSES = new Set<VendorStatus>([
+  "discovered",
+  "emailing",
+  "calling",
+  "quoted",
+  "negotiating",
+  "won",
+  "lost",
+]);
+
+/** The LLM occasionally invents free-form statuses ("researching", "ranking",
+ *  etc.). Coerce anything we don't recognize into a safe known value so the
+ *  client renderer never receives an unmapped string. */
+function coerceVendorStatus(raw: string | undefined): VendorStatus | undefined {
+  if (!raw) return undefined;
+  if (VALID_VENDOR_STATUSES.has(raw as VendorStatus)) return raw as VendorStatus;
+  const lower = raw.toLowerCase();
+  if (lower.includes("won") || lower.includes("agreed") || lower.includes("close")) return "won";
+  if (lower.includes("lost") || lower.includes("declin") || lower.includes("reject")) return "lost";
+  if (lower.includes("negot")) return "negotiating";
+  if (lower.includes("call") || lower.includes("ring")) return "calling";
+  if (lower.includes("email") || lower.includes("rfq") || lower.includes("outreach")) return "emailing";
+  if (lower.includes("quote") || lower.includes("price")) return "quoted";
+  return "discovered";
+}
+
 /**
  * Resolve the vendor the agent named — by canonical id OR human name — to its
  * table row, creating a minimal "discovered" row if it's genuinely new. This is
@@ -119,6 +145,7 @@ export function createAppServer(ctx: RunContext) {
         },
         async ({ item, quantity, region, targetPrice, currency, count }) => {
           const addedIds = new Set<string>();
+          const addedRows: Array<{ id: string; name: string; phone?: string; email?: string }> = [];
           const addOne = (s: {
             name: string;
             location?: string;
@@ -133,6 +160,7 @@ export function createAppServer(ctx: RunContext) {
             const id = slugify(s.name);
             if (!id || addedIds.has(id)) return;
             addedIds.add(id);
+            addedRows.push({ id, name: s.name, phone: s.phone, email: s.email });
             const vendor: Vendor = {
               id,
               name: s.name,
@@ -173,14 +201,33 @@ export function createAppServer(ctx: RunContext) {
           );
           for (const s of all) addOne(s); // safety net for any missed by the stream
 
+          if (addedRows.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `No suppliers found via research for ${item}; broaden the query or add one manually.`,
+                },
+              ],
+            };
+          }
+          // Echo back the EXACT canonical ids so the model targets the right row
+          // on its next call_supplier/update_quote (names resolve too — see
+          // ensureVendor — but exact ids avoid an extra fuzzy match).
+          const lines = addedRows.map(
+            (rr) =>
+              `- id="${rr.id}" · name="${rr.name}"` +
+              (rr.phone ? ` · phone=${rr.phone}` : "") +
+              (rr.email ? ` · email=${rr.email}` : ""),
+          );
           return {
             content: [
               {
                 type: "text",
                 text:
-                  addedIds.size > 0
-                    ? `Researched and added ${addedIds.size} real suppliers for ${item}.`
-                    : `No suppliers found via research for ${item}; broaden the query or add one manually.`,
+                  `Researched and added ${addedRows.length} real suppliers for ${item}. ` +
+                  `When you call_supplier or update_quote, pass one of these EXACT ids as vendorId:\n` +
+                  lines.join("\n"),
               },
             ],
           };
@@ -201,7 +248,10 @@ export function createAppServer(ctx: RunContext) {
         async ({ id, unitPrice, leadTimeDays, status, note, meetsDeadline }) => {
           const vendor = ensureVendor(ctx, id);
           const patch: Partial<Vendor> = {};
-          if (status !== undefined) patch.status = status as VendorStatus;
+          if (status !== undefined) {
+            const coerced = coerceVendorStatus(status);
+            if (coerced) patch.status = coerced;
+          }
           if (unitPrice !== undefined) {
             patch.negotiatedPrice = unitPrice;
             if (vendor.initialPrice == null) patch.initialPrice = unitPrice;
@@ -284,7 +334,7 @@ export function createAppServer(ctx: RunContext) {
               vendorId: vendor.id,
               vendorName: vendor.name,
               phone: vendor.contact?.phone ?? "",
-              goal: goal ?? "negotiate a quote",
+              goal: goal ?? state.request?.item ?? "negotiate a quote",
               targetPrice,
               walkAway,
               leadTimeDays,

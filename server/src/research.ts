@@ -50,17 +50,30 @@ export interface ResearchHandlers {
 }
 
 function buildPrompt(a: ResearchArgs): string {
-  const count = a.count ?? 4;
+  const count = a.count ?? 2;
   const region = a.region ? ` based in or shipping to ${a.region}` : "";
   const qty = a.quantity ? ` The buyer needs about ${a.quantity} units.` : "";
   const cur = a.currency ? ` Prefer prices in ${a.currency}.` : "";
   return [
-    `You are a FAST procurement research assistant for a LIVE demo. Find ${count} REAL, currently-operating suppliers/distributors of "${a.item}"${region}.${qty}`,
-    `SPEED IS CRITICAL. Run ONE or two web searches, then emit suppliers straight from the search results — do NOT open each company's website to verify.${cur} Use only real companies that actually appear in the results — never invent names. For EVERY supplier always provide: a contact \`email\` (the published sales/procurement address, else the standard one for their domain like sales@theirdomain.com), an \`moq\` (estimate if unstated), and a \`unitPrice\` number — the public/list price if shown, otherwise your best market estimate.`,
+    `You are a FAST procurement scout for a LIVE demo. Find ${count} REAL, currently-operating suppliers, distributors, or stockists of "${a.item}"${region}.${qty}`,
     ``,
-    `Stream as you go: the INSTANT you have a real name + location from the results, output it on its own line, before looking at the next, in EXACTLY this form:`,
-    `SUPPLIER: {"name":"…","location":"…","email":"…","moq":0,"unitPrice":0}`,
-    `(one compact JSON object per line; email and unitPrice are required — unitPrice must be a number, estimate it if needed). Emit all ${count} within about 20 seconds.`,
+    `SPEED RULES — emit each supplier the instant you have it, do NOT batch:`,
+    `- Run ONE broad WebSearch. That's it — no second search unless the first returned nothing usable.`,
+    `- Emit the FIRST credible supplier as a SUPPLIER: line IMMEDIATELY from the search snippet alone — do NOT open each company's website to verify.`,
+    `- Only WebFetch a URL if the company NAME is missing from the snippet. Never to "verify", "double-check", or "grab the latest price".`,
+    `- After WebFetch (when needed) emit the supplier SUPPLIER: line right away. Do not over-research.`,
+    `- The MOMENT you have ${count} suppliers, STOP. No further searches, no further fetches, no closing essay.`,
+    ``,
+    `Use only real companies that actually appear in the results — never invent company names. For EVERY supplier ALWAYS provide these three so the buyer can contact and compare:`,
+    `- \`email\`: the published sales/procurement address, else the standard one for their domain (e.g. sales@theirdomain.com).`,
+    `- \`moq\`: minimum order quantity — estimate a sensible number if unstated.`,
+    `- \`unitPrice\`: a NUMBER — the public/list price if shown, otherwise your best market estimate.`,
+    `Also capture \`location\` (city, country) and, when available, \`phone\` (the buyer may call) and \`url\`.${cur}`,
+    ``,
+    `STREAM YOUR RESULTS — each supplier on its own line BEFORE moving to the next, in EXACTLY this form:`,
+    `SUPPLIER: {"name":"…","location":"…","phone":"…","email":"…","url":"…","moq":0,"unitPrice":0}`,
+    `(one compact JSON object on a single line; email, moq and unitPrice are required — unitPrice must be a number; omit only phone/url if you truly don't have them).`,
+    `Target: ${count} suppliers, finished as fast as possible (about 20 seconds).`,
   ].join("\n");
 }
 

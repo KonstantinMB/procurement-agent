@@ -1,26 +1,37 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { ArrowRight, Command, RotateCcw } from "lucide-react";
+import { motion } from "motion/react";
+import { ArrowRight, Command } from "lucide-react";
 import { useStore } from "@/store";
-import { startCommand, resetRun } from "@/lib/api";
+import { startCommand } from "@/lib/api";
+import { SPRING } from "@/lib/motion";
+import { navigate, routes } from "@/lib/router";
 
 const PLACEHOLDER =
   "I need 50 brushless motors delivered by Friday under EUR 60/unit";
 
-export default function CommandBar() {
+export type CommandBarVariant = "topbar" | "hero";
+
+interface Props {
+  variant?: CommandBarVariant;
+}
+
+export default function CommandBar({ variant = "topbar" }: Props) {
   const [text, setText] = useState("");
+  const running = useStore((s) => s.running);
 
   async function run() {
     const value = text.trim();
     if (!value) return;
     setText("");
     // Start a NEW parallel run, then drill straight into it.
-    const res = await startCommand(value);
-    const runId = res?.runId;
-    if (runId) {
-      useStore.getState().openRun(runId, value);
-      useStore.getState().pushChat("user", value);
-    }
+    const runId = await startCommand(value);
+    if (!runId) return;
+    const s = useStore.getState();
+    s.ensureRun(runId, value);
+    s.setCurrentRunId(runId);
+    s.pushChat("user", value);
+    navigate(routes.detail(runId));
   }
 
   function onSubmit(e: FormEvent<HTMLFormElement>) {
@@ -28,46 +39,49 @@ export default function CommandBar() {
     void run();
   }
 
-  function resetAll() {
-    useStore.getState().reset();
-    void resetRun();
-  }
+  const isHero = variant === "hero";
+  const shellCls = isHero
+    ? "flex h-16 items-center gap-3 rounded-2xl border border-border bg-surface px-5 shadow-[var(--shadow-pop)] transition-colors focus-within:border-brand focus-within:ring-4 focus-within:ring-brand/15"
+    : "flex h-12 items-center gap-3 rounded-xl border border-border bg-surface px-4 transition-colors focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20";
+  const inputCls = isHero
+    ? "min-w-0 flex-1 border-0 bg-transparent text-base text-ink placeholder:text-faint focus:outline-none"
+    : "min-w-0 flex-1 border-0 bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none";
+  const buttonCls = isHero
+    ? "inline-flex h-11 shrink-0 items-center gap-1.5 rounded-xl bg-brand px-5 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
+    : "inline-flex h-9 shrink-0 items-center gap-1 rounded-lg bg-brand px-4 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50";
+  const iconSize = isHero ? "h-[18px] w-[18px]" : "h-4 w-4";
 
+  // We used to share a `layoutId` between the hero and top-bar variants so the
+  // input morphed between positions. That broke when the user navigated back
+  // RFQ → hero — motion captured the form mid-AnimatePresence-exit and the
+  // input never reappeared on the hero. Plain mount/fade is reliable both
+  // ways; we lose the morph but gain a working back-nav.
   return (
-    <div className="flex w-full items-center gap-3">
-      <form onSubmit={onSubmit} className="flex-1">
-        <div className="flex h-12 items-center gap-3 rounded-xl border border-border bg-surface px-4 transition-colors focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/20">
-          <Command className="h-4 w-4 shrink-0 text-faint" aria-hidden />
-          <input
-            type="text"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={PLACEHOLDER}
-            aria-label="Procurement request"
-            spellCheck={false}
-            autoComplete="off"
-            className="min-w-0 flex-1 border-0 bg-transparent text-sm text-ink placeholder:text-faint focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={!text.trim()}
-            className="inline-flex h-9 shrink-0 items-center gap-1 rounded-lg bg-brand px-4 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Run
-            <ArrowRight className="h-4 w-4" aria-hidden />
-          </button>
-        </div>
-      </form>
-
-      <button
-        type="button"
-        onClick={resetAll}
-        aria-label="Reset all runs"
-        title="Reset / abort all runs"
-        className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border bg-surface text-muted transition-colors hover:border-brand hover:text-brand"
-      >
-        <RotateCcw className="h-4 w-4" aria-hidden />
-      </button>
-    </div>
+    <motion.form
+      onSubmit={onSubmit}
+      transition={SPRING}
+      initial={isHero ? { opacity: 0, y: 8 } : false}
+      animate={isHero ? { opacity: 1, y: 0 } : { opacity: 1 }}
+      className="w-full"
+    >
+      <div className={shellCls}>
+        <Command className={`${iconSize} shrink-0 text-faint`} aria-hidden />
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={PLACEHOLDER}
+          aria-label="Procurement request"
+          spellCheck={false}
+          autoComplete="off"
+          autoFocus={isHero}
+          className={inputCls}
+        />
+        <button type="submit" disabled={running || !text.trim()} className={buttonCls}>
+          Run
+          <ArrowRight className={iconSize} aria-hidden />
+        </button>
+      </div>
+    </motion.form>
   );
 }

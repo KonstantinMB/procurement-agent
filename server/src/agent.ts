@@ -15,7 +15,13 @@ const pendingQuestions = new Map<
 >();
 let qCounter = 0;
 
-export function answerQuestion(id: string, answers: Record<string, string>): void {
+/**
+ * Resolve a pending AskUserQuestion. `runId` is part of the public contract
+ * (index.ts passes it through from /api/answer), but routing is driven by the
+ * globally-unique question id and the run-bound emit captured when the question
+ * was asked, so the answer always lands on the right run's card.
+ */
+export function answerQuestion(runId: string, id: string, answers: Record<string, string>): void {
   const q = pendingQuestions.get(id);
   if (q) {
     pendingQuestions.delete(id);

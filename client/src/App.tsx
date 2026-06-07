@@ -1,68 +1,147 @@
+import { useEffect } from "react";
 import { Toaster } from "sonner";
-import { ArrowLeft } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { useAgentStream } from "@/lib/sse";
-import { useStore } from "@/store";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
-import Dashboard from "@/components/Dashboard";
 import Headline from "@/components/Headline";
 import CallPanel from "@/components/CallPanel";
 import MasterTable from "@/components/MasterTable";
-import ActivityPanel from "@/components/ActivityPanel";
-import Chat from "@/components/Chat";
+import RightRail from "@/components/RightRail";
 import OrderNow from "@/components/OrderNow";
+import HomeHero from "@/components/HomeHero";
+import DashboardView from "@/components/views/DashboardView";
+import CallsView from "@/components/views/CallsView";
+import SuppliersView from "@/components/views/SuppliersView";
+import SettingsView from "@/components/views/SettingsView";
+import RfqList from "@/pages/RfqList";
+import { useStore } from "@/store";
+import { useRoute } from "@/lib/router";
 
-function RunDetail() {
-  const showDashboard = useStore((s) => s.showDashboard);
-  const request = useStore((s) => s.request);
+const EASE = [0.22, 1, 0.36, 1] as const;
 
+function RfqWorkspace() {
   return (
-    <div className="flex min-h-0 flex-1">
-      {/* Center: back → request headline → live call → master table */}
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 p-6">
-        <button
-          type="button"
-          onClick={showDashboard}
-          className="inline-flex w-fit items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:border-brand hover:text-brand"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
-          All runs
-        </button>
-        <Headline />
-        <CallPanel />
-        <MasterTable />
-        {!request && (
-          <p className="px-1 text-sm text-faint">This run has no data yet.</p>
-        )}
-      </main>
-
-      {/* Right: clean "what the agent is doing" + assistant */}
-      <aside className="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-border">
-        <div className="min-h-0 flex-[58]">
-          <ActivityPanel />
-        </div>
-        <div className="min-h-0 flex-[42] border-t border-border">
-          <Chat />
-        </div>
-      </aside>
-    </div>
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 p-6">
+      <Headline />
+      <CallPanel />
+      <MasterTable />
+    </main>
   );
+}
+
+/** Sync the route's runId into the store so legacy components keep working. */
+function useRouteRunSync() {
+  const route = useRoute();
+  const setCurrentRunId = useStore((s) => s.setCurrentRunId);
+  const ensureRun = useStore((s) => s.ensureRun);
+
+  useEffect(() => {
+    if (route.name === "detail") {
+      ensureRun(route.runId);
+      setCurrentRunId(route.runId);
+    } else if (route.name === "new") {
+      // Fresh-start hero: clear current run so the empty state shows.
+      setCurrentRunId(undefined);
+    }
+  }, [route.name === "detail" ? route.runId : route.name, ensureRun, setCurrentRunId]);
+}
+
+function RfqRoute() {
+  const route = useRoute();
+
+  if (route.name === "list") return <RfqList />;
+  if (route.name === "detail") return <RfqWorkspace />;
+
+  // "new"
+  return <HomeHero />;
+}
+
+function CurrentView() {
+  const view = useStore((s) => s.view);
+  const route = useRoute();
+  const onRfqRoute = route.name === "new" || route.name === "list" || route.name === "detail";
+
+  // When on an RFQ-route, the hash decides the sub-page. Otherwise the legacy
+  // "view" selector picks Dashboard/Calls/Suppliers/Settings.
+  if (onRfqRoute && view === "rfq") return <RfqRoute />;
+
+  switch (view) {
+    case "dashboard":
+      return <DashboardView />;
+    case "calls":
+      return <CallsView />;
+    case "suppliers":
+      return <SuppliersView />;
+    case "settings":
+      return <SettingsView />;
+    case "rfq":
+    default:
+      return <RfqRoute />;
+  }
 }
 
 export default function App() {
   useAgentStream();
+  useRouteRunSync();
+
+  const route = useRoute();
   const view = useStore((s) => s.view);
+
+  const isIdle = useStore(
+    (s) =>
+      !s.running &&
+      !s.request &&
+      s.vendorOrder.length === 0 &&
+      !s.summary &&
+      s.chat.length === 0,
+  );
+
+  const onNewRfqRoute = view === "rfq" && route.name === "new";
+  const showHero = isIdle && onNewRfqRoute;
+  const showRail = view !== "settings" && !showHero && route.name !== "list";
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-app text-ink">
       <Sidebar />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar />
-        {view === "dashboard" ? <Dashboard /> : <RunDetail />}
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        <AnimatePresence initial={false}>
+          {!showHero && (
+            <motion.div
+              key="topbar"
+              initial={{ y: -64, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: -64, opacity: 0 }}
+              transition={{ duration: 0.45, ease: EASE }}
+            >
+              <TopBar />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="relative flex min-h-0 flex-1">
+          <AnimatePresence mode="wait" initial={false}>
+            {showHero ? (
+              <HomeHero key="hero" />
+            ) : (
+              <motion.div
+                key="workspace"
+                initial={{ opacity: 0, y: 18 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 12 }}
+                transition={{ duration: 0.5, ease: EASE, delay: 0.08 }}
+                className="flex min-h-0 min-w-0 flex-1"
+              >
+                <CurrentView />
+                {showRail && <RightRail />}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
 
-      {view === "run" && <OrderNow />}
+      <OrderNow />
       <Toaster position="top-right" richColors closeButton />
     </div>
   );

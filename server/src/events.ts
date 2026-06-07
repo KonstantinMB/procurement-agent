@@ -173,3 +173,18 @@ export type EventOf<T extends AgentEventType> = Extract<AgentEvent, { type: T }>
  * status, the global run.reset) arrive with no runId.
  */
 export type WireEvent = AgentEvent & { runId?: string };
+
+/** Snapshot of a run used by the RFQ list page. */
+export interface RunSummary {
+  runId: string;
+  title: string;
+  createdAt: number;
+  status: "researching" | "calling" | "quoted" | "ordered" | "done";
+  request?: RfqRequest;
+  suppliers: number;
+  bestPrice?: number;
+  savings?: number;
+  currency: string;
+  withinBudget?: boolean;
+  ordered: boolean;
+}

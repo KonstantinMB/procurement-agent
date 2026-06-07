@@ -18,7 +18,7 @@ class EventBus {
       try {
         l(wire);
       } catch {
-        /* a slow/broken subscriber must not break the emit loop */
+        /* a broken subscriber must not break the emit loop */
       }
     }
   }

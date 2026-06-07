@@ -8,14 +8,39 @@ import { runAgent, pushUserMessage, answerQuestion } from "./agent";
 import { allRuns, getRun, removeRun, resetAllRuns } from "./runs";
 import { handleVapiWebhook } from "./voice";
 import { sendOrderEmail } from "./email";
+import type { RunSummary } from "./events";
 
 config();
 
 const app = new Hono();
 app.use("*", cors());
 
+/** Project the live run registry into the RunSummary list the RFQs page reads. */
+function summarise(): RunSummary[] {
+  return allRuns().map((ctx) => {
+    const r = ctx.state;
+    const s = r.computeSummary();
+    return {
+      runId: ctx.id,
+      title: r.title,
+      createdAt: ctx.createdAt,
+      status: r.derivedStatus(),
+      request: r.request,
+      suppliers: r.all().length,
+      bestPrice: s.bestPrice || undefined,
+      savings: s.savings || undefined,
+      currency: s.currency,
+      withinBudget: s.withinBudget,
+      ordered: !!r.ordered,
+    };
+  });
+}
+
 app.get("/health", (c) => c.json({ ok: true }));
 
+// ─── SSE: every event on the wire is tagged with runId so the client can
+// route it to the correct run-bucket. New SSE subscribers get a replay of
+// the current state for ALL active runs so multi-run UI stays coherent.
 app.get("/events", (c) =>
   streamSSE(c, async (stream) => {
     const unsub = bus.subscribe((e) => {
@@ -56,6 +81,7 @@ app.get("/events", (c) =>
   }),
 );
 
+// ─── Create a new RFQ run ─────────────────────────────────────────────────
 app.post("/api/command", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
   const text = String(body?.text ?? "");
@@ -64,6 +90,9 @@ app.post("/api/command", async (c) => {
   const runId = runAgent(text);
   return c.json({ ok: true, runId });
 });
+
+// ─── List all RFQ runs (for the RFQs page) ────────────────────────────────
+app.get("/api/runs", (c) => c.json({ runs: summarise() }));
 
 app.post("/api/chat", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
@@ -75,7 +104,8 @@ app.post("/api/chat", async (c) => {
 
 app.post("/api/answer", async (c) => {
   const body = await c.req.json().catch(() => ({}) as any);
-  if (body?.id) answerQuestion(String(body.id), body.answers ?? {});
+  const runId = body?.runId ? String(body.runId) : undefined;
+  if (body?.id && runId) answerQuestion(runId, String(body.id), body.answers ?? {});
   return c.json({ ok: true });
 });
 
@@ -94,6 +124,7 @@ app.post("/api/order", async (c) => {
   // sendOrderEmail never throws and routes to the demo inbox when configured.
   if (invoice) {
     const winner = vendorId ? ctx.state.resolve(vendorId) : ctx.state.bestVendor();
+    if (winner) ctx.state.ordered = { vendorId: winner.id, invoice };
     void sendOrderEmail({
       to: winner?.contact?.email ?? "sales@example.com",
       invoice,
@@ -117,9 +148,12 @@ app.post("/api/run/remove", async (c) => {
   return c.json({ ok: true });
 });
 
-app.post("/api/reset", (c) => {
-  // Global dashboard reset: abort + drop every run (emits run.reset).
-  resetAllRuns();
+app.post("/api/reset", async (c) => {
+  // Per-run remove when a runId is supplied; otherwise a global dashboard reset.
+  const body = await c.req.json().catch(() => ({}) as any);
+  const runId = body?.runId ? String(body.runId) : undefined;
+  if (runId) removeRun(runId);
+  else resetAllRuns();
   return c.json({ ok: true });
 });
 

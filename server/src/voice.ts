@@ -20,10 +20,13 @@ export interface CallArgs {
   vendorName: string;
   phone: string;
   goal: string;
+  quantity?: number;
   targetPrice?: number;
   walkAway?: number;
   leadTimeDays?: number;
   currency?: string;
+  /** Other suppliers' prices, passed to the assistant as leverage on the call. */
+  benchmarks?: string;
 }
 
 export interface CallResult {
@@ -79,6 +82,10 @@ export async function callSupplier(args: CallArgs, b: RunBinding): Promise<CallR
   b.emit({ type: "rfq.supplier_updated", id: args.vendorId, patch: { status: "calling" } });
 
   if (vapiReady && isCallableNumber(dial)) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[voice] Placing Vapi call for "${args.vendorName}" → ${dial} (assistantId=${process.env.VAPI_ASSISTANT_ID})`,
+    );
     try {
       const { VapiClient } = await import("@vapi-ai/server-sdk");
       const client = new VapiClient({ token: process.env.VAPI_API_KEY! });
@@ -90,13 +97,18 @@ export async function callSupplier(args: CallArgs, b: RunBinding): Promise<CallR
           variableValues: {
             supplier: args.vendorName,
             part: args.goal,
+            qty: String(args.quantity ?? ""),
             target_price: String(args.targetPrice ?? ""),
             walk_away: String(args.walkAway ?? ""),
             lead_time: String(args.leadTimeDays ?? ""),
+            currency: args.currency ?? "EUR",
+            benchmarks: args.benchmarks ?? "no other quotes yet",
           },
         },
       } as any);
       if (call?.id) {
+        // eslint-disable-next-line no-console
+        console.log(`[voice] Vapi call placed: id=${call.id}`);
         bindingByCall.set(call.id, { b, vendorId: args.vendorId });
         // With a public webhook URL, Vapi streams events to /webhooks/vapi and
         // handleVapiWebhook resolves this promise. On a laptop (no public URL)
@@ -114,9 +126,16 @@ export async function callSupplier(args: CallArgs, b: RunBinding): Promise<CallR
         }
         return await pollVapiCall(process.env.VAPI_API_KEY!, call.id, args, b);
       }
-    } catch {
+      // eslint-disable-next-line no-console
+      console.error("[voice] Vapi returned no call.id:", call);
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.error("[voice] Vapi call failed:", e?.statusCode ?? "", e?.body ?? e?.message ?? e);
       /* fall through to the scripted call so it still works without Vapi */
     }
+  } else if (!vapiReady) {
+    // eslint-disable-next-line no-console
+    console.warn("[voice] VAPI not fully configured — using scripted fallback (no phone will ring).");
   }
 
   return runScriptedCall(args, b);
