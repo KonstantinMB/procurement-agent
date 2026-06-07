@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -10,7 +12,14 @@ import { handleVapiWebhook } from "./voice";
 import { sendOrderEmail } from "./email";
 import type { RunSummary } from "./events";
 
-config();
+// Secrets may live in EITHER server/.env or the repo-root .env. Load both,
+// resolved relative to THIS file (not cwd), so `npm --prefix server run dev`
+// (which runs with cwd=server/) still picks up keys kept only in the root .env —
+// e.g. RESEND_API_KEY. dotenv never overrides an already-set var, so server/.env
+// (loaded first) wins on any conflict.
+const here = dirname(fileURLToPath(import.meta.url));
+config({ path: resolve(here, "../.env") }); // server/.env
+config({ path: resolve(here, "../../.env") }); // repo-root .env
 
 const app = new Hono();
 app.use("*", cors());
