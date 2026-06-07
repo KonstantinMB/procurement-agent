@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "motion/react";
 import {
   ArrowDownLeft,
@@ -76,11 +76,31 @@ function EmailCard({ email }: { email: VendorEmail }) {
 
 export default function VendorThread({ vendorId }: { vendorId: string }) {
   const thread = useStore((s) => s.vendorThreads[vendorId]);
+  const call = useStore((s) => s.call);
+  const vendorName = useStore((s) => s.vendors[vendorId]?.name);
   const emails = thread?.emails ?? [];
-  const transcript = thread?.transcript ?? [];
 
-  const [tab, setTab] = useState<"emails" | "transcript">(
-    emails.length === 0 && transcript.length > 0 ? "transcript" : "emails",
+  // Fallback chain for the transcript: archived → live call (same vendorId) →
+  // live call (matching vendorName when the agent passed a slightly different
+  // id to call_supplier). Some Vapi setups will emit transcript events with a
+  // different vendorId than the one we set on call.ringing — this stitches
+  // those cases back together visually.
+  const transcript = useMemo(() => {
+    if (thread?.transcript.length) return thread.transcript;
+    if (call.transcript.length === 0) return [];
+    const sameId = call.vendorId && call.vendorId === vendorId;
+    const sameName =
+      !sameId &&
+      vendorName &&
+      call.vendorName &&
+      call.vendorName.toLowerCase() === vendorName.toLowerCase();
+    if (sameId || sameName) return call.transcript;
+    return [];
+  }, [thread?.transcript, call.vendorId, call.vendorName, call.transcript, vendorId, vendorName]);
+
+  // Default to whichever tab has something to show.
+  const [tab, setTab] = useState<"emails" | "transcript">(() =>
+    transcript.length > 0 && emails.length === 0 ? "transcript" : "emails",
   );
 
   const tabBtn = (key: "emails" | "transcript", label: string, count: number, Icon: typeof Mail) => {

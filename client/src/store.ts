@@ -370,9 +370,20 @@ function applyOne(r: RunData, e: WireEvent): RunData {
           transcript: [...r.call.transcript, line],
         },
       };
-      // Also archive the line on the vendor thread so it survives past the
-      // current call and renders in the supplier-row expander after hang-up.
-      return pushTranscript(withCall, e.vendorId, line);
+      // Archive on the vendor thread so it survives past the current call.
+      // Belt-and-braces: write to BOTH the event's vendorId and the live
+      // call.vendorId when they differ. In practice Vapi will occasionally
+      // emit transcript events with a different vendorId than the one we set
+      // on call.ringing (or the agent passes the wrong id to call_supplier).
+      // Without this duplication the live CallPanel would show the lines
+      // (sourced from call.transcript) while the supplier-row expander would
+      // show "No transcript captured" — exactly the bug we just hit.
+      const callVid = withCall.call.vendorId;
+      let next = pushTranscript(withCall, e.vendorId, line);
+      if (callVid && callVid !== e.vendorId) {
+        next = pushTranscript(next, callVid, line);
+      }
+      return next;
     }
     case "call.quote": {
       const call = {
