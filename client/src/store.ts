@@ -236,6 +236,9 @@ function applyOne(r: RunData, e: WireEvent): RunData {
     case "done":
       return { ...r, running: false, thinking: false };
     case "tool.call": {
+      // set_request only drives the request header (via rfq.request); it's not a
+      // meaningful action, so keep it out of the live activity feed.
+      if (e.name === "mcp__app__set_request") return r;
       const toolCalls = {
         ...r.toolCalls,
         [e.id]: {
