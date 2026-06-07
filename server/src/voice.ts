@@ -1,27 +1,27 @@
 // ─────────────────────────────────────────────────────────────────────────
 // VOICE — Vapi outbound-call integration with hybrid dialing + offline fallback.
 //
-// callSupplier() dials the supplier's discovered number when present, else the
-// configured FALLBACK_PHONE_NUMBER (a controlled number). With VAPI_API_KEY set
-// it places a REAL call via the Vapi server SDK; otherwise it runs a generic
-// scripted negotiation that emits the same AgentEvent stream the UI projects.
-// Live calls are driven by Vapi webhooks (handleVapiWebhook), which bridge
-// transcripts / tool-calls / end-of-call reports onto the bus and resolve the
-// in-flight callSupplier() promise.
+// Each call is bound to a runId (which RFQ it belongs to) so concurrent runs
+// stay isolated and Vapi webhooks route events back to the right run.
+// callSupplier() dials the supplier's discovered number when present, else
+// FALLBACK_PHONE_NUMBER. With DEMO_DIAL_FALLBACK=true, always dials FALLBACK.
 // ─────────────────────────────────────────────────────────────────────────
 
 import { bus } from "./bus";
-import { rfq } from "./state";
+import { rfqs } from "./state";
 
 export interface CallArgs {
+  runId: string;
   vendorId: string;
   vendorName: string;
   phone: string;
   goal: string;
+  quantity?: number;
   targetPrice?: number;
   walkAway?: number;
   leadTimeDays?: number;
   currency?: string;
+  benchmarks?: string;
 }
 
 export interface CallResult {
@@ -32,88 +32,122 @@ export interface CallResult {
 }
 
 const pendingByCall = new Map<string, (r: CallResult) => void>();
-const vendorByCall = new Map<string, string>();
+const callRoute = new Map<string, { runId: string; vendorId: string }>();
 
-/** Loose E.164-ish check — enough to tell a real number from a blank/garbage. */
 function isCallableNumber(p?: string): boolean {
   return !!p && /\+?\d[\d\s().-]{6,}/.test(p);
 }
 
-/**
- * Place a negotiation call. Dials the discovered number, else FALLBACK_PHONE_NUMBER.
- * Emits ringing + flips the vendor to "calling", then drives a live Vapi call
- * (when configured) or a generic scripted fallback.
- */
+function envFlag(name: string): boolean {
+  const v = process.env[name];
+  return !!v && /^(1|true|yes|on)$/i.test(v.trim());
+}
+
 export async function callSupplier(args: CallArgs): Promise<CallResult> {
-  const dial = isCallableNumber(args.phone)
-    ? args.phone
-    : process.env.FALLBACK_PHONE_NUMBER ?? "";
+  const runId = args.runId;
+  const fallback = process.env.FALLBACK_PHONE_NUMBER ?? "";
+  const demoForce = envFlag("DEMO_DIAL_FALLBACK");
+  const dial =
+    demoForce && isCallableNumber(fallback)
+      ? fallback
+      : isCallableNumber(args.phone)
+        ? args.phone
+        : fallback;
+  if (demoForce) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[voice][${runId}] DEMO_DIAL_FALLBACK on → routing call for "${args.vendorName}" to ${fallback || "(unset)"} (discovered: ${args.phone || "none"})`,
+    );
+  }
 
   if (!isCallableNumber(dial)) {
-    // No supplier number and no fallback configured — cannot place a call.
-    bus.emit({ type: "call.ended", vendorId: args.vendorId, outcome: "no-answer" });
-    rfq.patchVendor(args.vendorId, { note: "No phone number available" });
-    bus.emit({
-      type: "rfq.supplier_updated",
-      id: args.vendorId,
-      patch: { note: "No phone number available" },
-    });
+    bus.emit(runId, { type: "call.ended", vendorId: args.vendorId, outcome: "no-answer" });
+    const r = rfqs.get(runId);
+    if (r) {
+      r.patchVendor(args.vendorId, { note: "No phone number available" });
+      bus.emit(runId, {
+        type: "rfq.supplier_updated",
+        id: args.vendorId,
+        patch: { note: "No phone number available" },
+      });
+    }
     return { transcript: "", success: false };
   }
 
-  bus.emit({
+  bus.emit(runId, {
     type: "call.ringing",
     vendorId: args.vendorId,
     vendorName: args.vendorName,
     phone: dial,
   });
-  rfq.patchVendor(args.vendorId, { status: "calling" });
-  bus.emit({ type: "rfq.supplier_updated", id: args.vendorId, patch: { status: "calling" } });
+  const ringingPatch: Partial<{ status: "calling"; note: string }> = { status: "calling" };
+  if (demoForce) ringingPatch.note = "Demo · routing call to your number";
+  const r = rfqs.get(runId);
+  if (r) r.patchVendor(args.vendorId, ringingPatch);
+  bus.emit(runId, { type: "rfq.supplier_updated", id: args.vendorId, patch: ringingPatch });
 
   if (process.env.VAPI_API_KEY) {
-    try {
-      const { VapiClient } = await import("@vapi-ai/server-sdk");
-      const client = new VapiClient({ token: process.env.VAPI_API_KEY });
-      const call: any = await client.calls.create({
-        assistantId: process.env.VAPI_ASSISTANT_ID,
-        phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
-        customer: { number: dial },
-        assistantOverrides: {
-          variableValues: {
-            supplier: args.vendorName,
-            part: args.goal,
-            target_price: String(args.targetPrice ?? ""),
-            walk_away: String(args.walkAway ?? ""),
-            lead_time: String(args.leadTimeDays ?? ""),
+    if (!process.env.VAPI_ASSISTANT_ID || !process.env.VAPI_PHONE_NUMBER_ID) {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[voice] VAPI_API_KEY is set but VAPI_ASSISTANT_ID or VAPI_PHONE_NUMBER_ID is missing — cannot place a real call.",
+      );
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[voice][${runId}] Placing Vapi call for "${args.vendorName}" → ${dial} (assistantId=${process.env.VAPI_ASSISTANT_ID})`,
+      );
+      try {
+        const { VapiClient } = await import("@vapi-ai/server-sdk");
+        const client = new VapiClient({ token: process.env.VAPI_API_KEY });
+        const call: any = await client.calls.create({
+          assistantId: process.env.VAPI_ASSISTANT_ID,
+          phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
+          customer: { number: dial },
+          assistantOverrides: {
+            variableValues: {
+              supplier: args.vendorName,
+              part: args.goal,
+              qty: String(args.quantity ?? ""),
+              target_price: String(args.targetPrice ?? ""),
+              walk_away: String(args.walkAway ?? ""),
+              lead_time: String(args.leadTimeDays ?? ""),
+              currency: args.currency ?? "EUR",
+              benchmarks: args.benchmarks ?? "no other quotes yet",
+            },
           },
-        },
-      } as any);
-      if (call?.id) {
-        vendorByCall.set(call.id, args.vendorId);
-        return await new Promise<CallResult>((resolve) => {
-          pendingByCall.set(call.id, resolve);
-          setTimeout(() => {
-            if (pendingByCall.has(call.id)) {
-              pendingByCall.delete(call.id);
-              resolve({ transcript: "", success: false });
-            }
-          }, 180000);
-        });
+        } as any);
+        if (call?.id) {
+          // eslint-disable-next-line no-console
+          console.log(`[voice][${runId}] Vapi call placed: id=${call.id}`);
+          callRoute.set(call.id, { runId, vendorId: args.vendorId });
+          return await new Promise<CallResult>((resolve) => {
+            pendingByCall.set(call.id, resolve);
+            setTimeout(() => {
+              if (pendingByCall.has(call.id)) {
+                pendingByCall.delete(call.id);
+                resolve({ transcript: "", success: false });
+              }
+            }, 180000);
+          });
+        }
+        // eslint-disable-next-line no-console
+        console.error("[voice] Vapi returned no call.id:", call);
+      } catch (e: any) {
+        // eslint-disable-next-line no-console
+        console.error("[voice] Vapi call failed:", e?.statusCode ?? "", e?.body ?? e?.message ?? e);
       }
-    } catch {
-      /* fall through to the scripted call so it still works without Vapi */
     }
+  } else {
+    // eslint-disable-next-line no-console
+    console.warn("[voice] VAPI_API_KEY not set — using scripted fallback (no phone will ring).");
   }
 
   return runScriptedCall(args);
 }
 
-/**
- * Generic offline negotiation (no Vapi key). Derives a believable price arc from
- * the request's target and emits the same events a live call would. Contains no
- * request-specific hardcoding.
- */
 function runScriptedCall(args: CallArgs): Promise<CallResult> {
+  const runId = args.runId;
   const currency = args.currency ?? "EUR";
   const target = args.targetPrice;
   const lead = args.leadTimeDays ?? 14;
@@ -161,11 +195,11 @@ function runScriptedCall(args: CallArgs): Promise<CallResult> {
       setTimeout(fn, t);
     };
 
-    at(1200, () => bus.emit({ type: "call.connected", vendorId: args.vendorId }));
+    at(1200, () => bus.emit(runId, { type: "call.connected", vendorId: args.vendorId }));
 
     for (const line of lines) {
       at(2000, () => {
-        bus.emit({
+        bus.emit(runId, {
           type: "call.transcript",
           vendorId: args.vendorId,
           speaker: line.speaker,
@@ -177,20 +211,27 @@ function runScriptedCall(args: CallArgs): Promise<CallResult> {
 
     at(2000, () => {
       if (unitPrice != null) {
-        bus.emit({ type: "call.quote", vendorId: args.vendorId, unitPrice, currency, leadTimeDays });
+        bus.emit(runId, {
+          type: "call.quote",
+          vendorId: args.vendorId,
+          unitPrice,
+          currency,
+          leadTimeDays,
+        });
         const patch = {
           status: "negotiating" as const,
           negotiatedPrice: unitPrice,
           currency,
           leadTimeDays,
         };
-        rfq.patchVendor(args.vendorId, patch);
-        bus.emit({ type: "rfq.supplier_updated", id: args.vendorId, patch });
+        const r = rfqs.get(runId);
+        if (r) r.patchVendor(args.vendorId, patch);
+        bus.emit(runId, { type: "rfq.supplier_updated", id: args.vendorId, patch });
       }
     });
 
     at(1200, () => {
-      bus.emit({ type: "call.ended", vendorId: args.vendorId, outcome: "success" });
+      bus.emit(runId, { type: "call.ended", vendorId: args.vendorId, outcome: "success" });
       resolve({
         transcript: lines.map((l) => `${l.speaker}: ${l.text}`).join("\n"),
         unitPrice,
@@ -201,66 +242,58 @@ function runScriptedCall(args: CallArgs): Promise<CallResult> {
   });
 }
 
-/**
- * Bridge Vapi server webhooks onto the bus. Fully defensive: any field may be
- * absent. For tool-calls it returns the ack payload Vapi expects; else void.
- */
+/** Bridge Vapi server webhooks onto the bus, routed by runId. */
 export function handleVapiWebhook(
   payload: any,
 ): { results?: Array<{ toolCallId: string; result: string }> } | void {
   const m = payload?.message;
   const type = m?.type;
   const callId = m?.call?.id;
-  const vendorId = callId ? vendorByCall.get(callId) : undefined;
+  const route = callId ? callRoute.get(callId) : undefined;
+  if (!route) return; // unknown call — ignore (still ack tool-calls below)
+  const { runId, vendorId } = route;
 
   switch (type) {
     case "status-update": {
-      if (m?.status === "in-progress" && vendorId) {
-        bus.emit({ type: "call.connected", vendorId });
-      }
-      if (m?.status === "ended" && vendorId) {
-        bus.emit({ type: "call.ended", vendorId, outcome: "success" });
-      }
+      if (m?.status === "in-progress") bus.emit(runId, { type: "call.connected", vendorId });
+      if (m?.status === "ended") bus.emit(runId, { type: "call.ended", vendorId, outcome: "success" });
       return;
     }
 
     case "transcript": {
-      if (vendorId) {
-        bus.emit({
-          type: "call.transcript",
-          vendorId,
-          speaker: m?.role === "assistant" ? "agent" : "supplier",
-          text: m?.transcript ?? "",
-          final: m?.transcriptType === "final",
-        });
-      }
+      bus.emit(runId, {
+        type: "call.transcript",
+        vendorId,
+        speaker: m?.role === "assistant" ? "agent" : "supplier",
+        text: m?.transcript ?? "",
+        final: m?.transcriptType === "final",
+      });
       return;
     }
 
     case "tool-calls": {
       const list: any[] = m?.toolCallList ?? [];
+      const r = rfqs.get(runId);
       for (const t of list) {
         const name = t?.function?.name ?? t?.name;
         if (name === "report_quote") {
           const a = t?.function?.arguments ?? t?.arguments ?? {};
-          if (vendorId) {
-            const unitPrice = Number(a.unitPrice);
-            const leadTimeDays = Number(a.leadTimeDays);
-            bus.emit({
-              type: "call.quote",
-              vendorId,
-              unitPrice,
-              currency: rfq.get(vendorId)?.currency ?? rfq.request?.currency ?? "EUR",
-              leadTimeDays,
-            });
-            const patch = {
-              status: "negotiating" as const,
-              negotiatedPrice: unitPrice,
-              leadTimeDays,
-            };
-            rfq.patchVendor(vendorId, patch);
-            bus.emit({ type: "rfq.supplier_updated", id: vendorId, patch });
-          }
+          const unitPrice = Number(a.unitPrice);
+          const leadTimeDays = Number(a.leadTimeDays);
+          bus.emit(runId, {
+            type: "call.quote",
+            vendorId,
+            unitPrice,
+            currency: r?.get(vendorId)?.currency ?? r?.request?.currency ?? "EUR",
+            leadTimeDays,
+          });
+          const patch = {
+            status: "negotiating" as const,
+            negotiatedPrice: unitPrice,
+            leadTimeDays,
+          };
+          if (r) r.patchVendor(vendorId, patch);
+          bus.emit(runId, { type: "rfq.supplier_updated", id: vendorId, patch });
         }
       }
       return {
@@ -272,9 +305,7 @@ export function handleVapiWebhook(
     }
 
     case "end-of-call-report": {
-      if (vendorId) {
-        bus.emit({ type: "call.ended", vendorId, outcome: "success" });
-      }
+      bus.emit(runId, { type: "call.ended", vendorId, outcome: "success" });
       const r = callId ? pendingByCall.get(callId) : undefined;
       if (r && callId) {
         pendingByCall.delete(callId);

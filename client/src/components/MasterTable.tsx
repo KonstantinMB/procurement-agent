@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import NumberFlow from "@number-flow/react";
-import { Phone, Mail, Globe, Check, X, Star, Loader2, Search } from "lucide-react";
+import {
+  Phone,
+  Mail,
+  Globe,
+  Check,
+  X,
+  Star,
+  Search,
+  ChevronRight,
+  MessageSquare,
+} from "lucide-react";
 import { useStore } from "@/store";
 import { SPRING_SNAPPY, formatMoney } from "@/lib/motion";
 import type { Vendor, VendorStatus } from "@/lib/events";
+import RowOrderButton from "./RowOrderButton";
+import WarmupCanvas from "./WarmupCanvas";
+import VendorThread from "./VendorThread";
 
 // ─── status → label + pill classes ────────────────────────────────────────
 const STATUS: Record<VendorStatus, { label: string; cls: string; live?: boolean }> = {
@@ -33,8 +46,11 @@ function useFlash(value: unknown): boolean {
   return flash;
 }
 
-function StatusPill({ status }: { status: VendorStatus }) {
-  const s = STATUS[status];
+function StatusPill({ status }: { status: VendorStatus | undefined }) {
+  // Defensive: if the server emits a status the client doesn't know yet
+  // (or the field is missing entirely on a freshly streamed row), fall back
+  // to "discovered" instead of crashing the whole table.
+  const s = (status && STATUS[status]) || STATUS.discovered;
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium ${s.cls}`}
@@ -50,34 +66,48 @@ function StatusPill({ status }: { status: VendorStatus }) {
   );
 }
 
+// The contact cell is the worst offender for column-blow-out — long URLs
+// would expand the column and overlap MOQ / Est. Price / Negotiated / Lead.
+// Using `flex` + a span with `min-w-0 truncate` inside a fixed-width row
+// forces ellipsis instead of letting the column auto-size to the URL.
+const CONTACT_ROW = "flex items-center gap-1.5 max-w-[200px] min-w-0";
+const CONTACT_TEXT = "min-w-0 flex-1 truncate";
+
 function Contact({ contact }: { contact: Vendor["contact"] }) {
   if (!contact) return <span className="text-faint">—</span>;
   if (contact.phone)
     return (
-      <span className="inline-flex items-center gap-1.5 text-muted">
+      <span className={`${CONTACT_ROW} text-muted`} title={contact.phone}>
         <Phone size={13} className="shrink-0 text-faint" />
-        <span className="truncate">{contact.phone}</span>
+        <span className={CONTACT_TEXT}>{contact.phone}</span>
       </span>
     );
   if (contact.email)
     return (
-      <span className="inline-flex items-center gap-1.5 text-muted">
+      <a
+        href={`mailto:${contact.email}`}
+        className={`${CONTACT_ROW} text-muted hover:text-brand`}
+        title={contact.email}
+      >
         <Mail size={13} className="shrink-0 text-faint" />
-        <span className="truncate">{contact.email}</span>
-      </span>
+        <span className={CONTACT_TEXT}>{contact.email}</span>
+      </a>
     );
-  if (contact.url)
+  if (contact.url) {
+    const display = contact.url.replace(/^https?:\/\/(www\.)?/, "");
     return (
       <a
         href={contact.url}
         target="_blank"
         rel="noreferrer"
-        className="inline-flex items-center gap-1.5 text-brand hover:underline"
+        className={`${CONTACT_ROW} text-brand hover:underline`}
+        title={contact.url}
       >
         <Globe size={13} className="shrink-0" />
-        <span className="truncate">{contact.url.replace(/^https?:\/\/(www\.)?/, "")}</span>
+        <span className={CONTACT_TEXT}>{display}</span>
       </a>
     );
+  }
   return <span className="text-faint">—</span>;
 }
 
@@ -99,20 +129,36 @@ const COLS = [
   { k: "idx", label: "#", num: true, w: "w-10" },
   { k: "name", label: "Supplier", num: false },
   { k: "loc", label: "Location", num: false },
-  { k: "contact", label: "Contact", num: false },
-  { k: "moq", label: "MOQ", num: true },
-  { k: "est", label: "Est. price", num: true },
-  { k: "neg", label: "Negotiated", num: true },
-  { k: "lead", label: "Lead", num: true },
-  { k: "status", label: "Status", num: false },
+  { k: "contact", label: "Contact", num: false, w: "w-[220px]" },
+  { k: "moq", label: "MOQ", num: true, w: "w-[72px]" },
+  { k: "est", label: "Est. price", num: true, w: "w-[110px]" },
+  { k: "neg", label: "Negotiated", num: true, w: "w-[110px]" },
+  { k: "lead", label: "Lead", num: true, w: "w-[80px]" },
+  { k: "status", label: "Status", num: false, w: "w-[120px]" },
   { k: "notes", label: "Notes", num: false },
+  { k: "action", label: "Action", num: false, w: "w-[90px]" },
 ];
 
-function VendorRow({ id, index }: { id: string; index: number }) {
+function VendorRow({
+  id,
+  index,
+  expanded,
+  onToggle,
+}: {
+  id: string;
+  index: number;
+  expanded: boolean;
+  onToggle: (id: string) => void;
+}) {
   const v = useStore((s) => s.vendors[id]);
+  const thread = useStore((s) => s.vendorThreads[id]);
   const flashNeg = useFlash(v?.negotiatedPrice);
   const flashStatus = useFlash(v?.status);
   if (!v) return null;
+
+  const emailCount = thread?.emails.length ?? 0;
+  const transcriptCount = thread?.transcript.length ?? 0;
+  const hasThread = emailCount > 0 || transcriptCount > 0;
 
   const active = v.status === "calling" || v.status === "negotiating";
   const won = v.status === "won";
@@ -135,12 +181,38 @@ function VendorRow({ id, index }: { id: string; index: number }) {
       animate={{ opacity: lost ? 0.55 : 1, y: 0 }}
       exit={{ opacity: 0 }}
       transition={SPRING_SNAPPY}
-      className={`${rowBg} ${active ? "shadow-[inset_2px_0_0_0_var(--color-brand)]" : won ? "shadow-[inset_2px_0_0_0_var(--color-success)]" : ""} hover:bg-hover/60`}
+      onClick={() => onToggle(id)}
+      className={`cursor-pointer ${rowBg} ${active ? "shadow-[inset_2px_0_0_0_var(--color-brand)]" : won ? "shadow-[inset_2px_0_0_0_var(--color-success)]" : ""} hover:bg-hover/60`}
     >
-      <td className={`${tdNum} text-faint`}>{index + 1}</td>
+      <td className={`${tdNum} text-faint`}>
+        <span className="inline-flex items-center justify-end gap-1">
+          <motion.span
+            animate={{ rotate: expanded ? 90 : 0 }}
+            transition={{ duration: 0.18 }}
+            className="inline-flex"
+            aria-hidden
+          >
+            <ChevronRight size={12} className={hasThread ? "text-brand" : "text-faint/60"} />
+          </motion.span>
+          <span>{index + 1}</span>
+        </span>
+      </td>
       <td className={`${td} font-medium text-ink`}>
         <div className="flex items-center gap-2">
-          <span className="truncate">{v.name}</span>
+          {v.contact?.url ? (
+            <a
+              href={v.contact.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="truncate hover:text-brand hover:underline"
+              title={v.contact.url}
+            >
+              {v.name}
+            </a>
+          ) : (
+            <span className="truncate">{v.name}</span>
+          )}
           {v.rating != null && (
             <span className="inline-flex items-center gap-0.5 text-xs text-faint">
               <Star size={11} className="text-warn" /> {v.rating.toFixed(1)}
@@ -176,7 +248,51 @@ function VendorRow({ id, index }: { id: string; index: number }) {
         <StatusPill status={v.status} />
       </td>
       <td className={`${td} max-w-[240px] text-xs text-muted`}>
-        <span className="line-clamp-2">{v.note ?? ""}</span>
+        <div className="flex flex-col gap-1">
+          <span className="line-clamp-2">{v.note ?? ""}</span>
+          {hasThread && (
+            <div className="flex items-center gap-1.5">
+              {emailCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-hover px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                  <Mail size={10} strokeWidth={2.2} />
+                  <span className="tnum">{emailCount}</span>
+                </span>
+              )}
+              {transcriptCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-hover px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                  <MessageSquare size={10} strokeWidth={2.2} />
+                  <span className="tnum">{transcriptCount}</span>
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </td>
+      <td className={`${td} text-right`} onClick={(e) => e.stopPropagation()}>
+        <RowOrderButton vendorId={v.id} />
+      </td>
+    </motion.tr>
+  );
+}
+
+/** Renders right under a VendorRow when the user expands it — emails + transcript. */
+function VendorRowExpansion({
+  vendorId,
+  colSpan,
+}: {
+  vendorId: string;
+  colSpan: number;
+}) {
+  return (
+    <motion.tr
+      layout
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18 }}
+    >
+      <td colSpan={colSpan} className="border-b border-border bg-app/40 p-0">
+        <VendorThread vendorId={vendorId} />
       </td>
     </motion.tr>
   );
@@ -185,58 +301,111 @@ function VendorRow({ id, index }: { id: string; index: number }) {
 export default function MasterTable() {
   const vendorOrder = useStore((s) => s.vendorOrder);
   const running = useStore((s) => s.running);
+  // Only show the rich warmup canvas while we have ZERO suppliers. The instant
+  // the first vendor lands we swap to the real table so the user sees it in
+  // place — the warmup collapses into a slim "still discovering" status strip.
+  const hasVendors = vendorOrder.length > 0;
+  const showWarmup = running && !hasVendors;
+  const stillDiscovering = running && hasVendors;
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const toggle = (id: string) => setExpanded((cur) => (cur === id ? null : id));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-[var(--shadow-card)]">
       <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
-        <span className="eyebrow">Master table — suppliers</span>
+        <span className="eyebrow">
+          {showWarmup ? "Warming up · live agent activity" : "Master table — suppliers"}
+        </span>
         <span className="ml-auto font-mono text-xs text-faint">
           {vendorOrder.length} row{vendorOrder.length === 1 ? "" : "s"}
         </span>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full border-collapse text-sm">
-          <thead className="sticky top-0 z-10 bg-elevated">
-            <tr>
-              {COLS.map((c) => (
-                <th
-                  key={c.k}
-                  className={`border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-faint ${
-                    c.num ? "text-right" : "text-left"
-                  } ${c.w ?? ""}`}
-                >
-                  {c.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <AnimatePresence initial={false}>
-              {vendorOrder.map((id, i) => (
-                <VendorRow key={id} id={id} index={i} />
-              ))}
-            </AnimatePresence>
+      {/* Live "still discovering" strip — shows when we already have suppliers
+          but the agent is still working. Tells the user the table will keep
+          growing without re-hiding it behind the warmup canvas. */}
+      {stillDiscovering && (
+        <motion.div
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+          className="flex items-center gap-2 border-b border-border bg-brand/[0.04] px-4 py-1.5"
+        >
+          <motion.span
+            aria-hidden
+            className="h-1.5 w-1.5 rounded-full bg-brand"
+            animate={{ opacity: [1, 0.3, 1], scale: [1, 0.85, 1] }}
+            transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+          />
+          <span className="text-xs font-medium text-brand">
+            Discovering more suppliers…
+          </span>
+          <span className="ml-auto tnum text-xs text-faint">
+            {vendorOrder.length} found
+          </span>
+        </motion.div>
+      )}
 
-            {vendorOrder.length === 0 && (
+      {showWarmup ? (
+        <WarmupCanvas />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead className="sticky top-0 z-10 bg-elevated">
               <tr>
-                <td colSpan={COLS.length} className="px-4 py-16 text-center">
-                  <div className="flex flex-col items-center gap-2 text-faint">
-                    {running ? (
-                      <Loader2 size={20} className="animate-spin text-brand" />
-                    ) : (
-                      <Search size={20} />
-                    )}
-                    <span className="text-sm">
-                      {running ? "Researching suppliers…" : "Enter a request to start sourcing"}
-                    </span>
-                  </div>
-                </td>
+                {COLS.map((c) => (
+                  <th
+                    key={c.k}
+                    className={`border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wide text-faint ${
+                      c.num ? "text-right" : "text-left"
+                    } ${c.w ?? ""}`}
+                  >
+                    {c.label}
+                  </th>
+                ))}
               </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              <AnimatePresence initial={false}>
+                {vendorOrder.flatMap((id, i) => {
+                  const rows = [
+                    <VendorRow
+                      key={id}
+                      id={id}
+                      index={i}
+                      expanded={expanded === id}
+                      onToggle={toggle}
+                    />,
+                  ];
+                  if (expanded === id) {
+                    rows.push(
+                      <VendorRowExpansion
+                        key={`${id}:expand`}
+                        vendorId={id}
+                        colSpan={COLS.length}
+                      />,
+                    );
+                  }
+                  return rows;
+                })}
+              </AnimatePresence>
+
+              {vendorOrder.length === 0 && (
+                <tr>
+                  <td colSpan={COLS.length} className="px-4 py-16 text-center">
+                    <div className="flex flex-col items-center gap-2 text-faint">
+                      <Search size={20} />
+                      <span className="text-sm">
+                        Enter a request to start sourcing
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

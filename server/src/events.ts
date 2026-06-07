@@ -142,14 +142,24 @@ export type AgentEvent =
       leadTimeDays: number;
     }
   | { type: "call.ended"; vendorId: string; outcome: "success" | "failed" | "no-answer" }
-  // email
-  | { type: "email.sent"; vendorId: string; to: string; subject: string }
+  // email — body included so the UI can render the actual thread
+  | {
+      type: "email.sent";
+      vendorId: string;
+      to: string;
+      subject: string;
+      body?: string;
+      at?: number;
+    }
   | {
       type: "email.reply";
       vendorId: string;
       from: string;
+      subject?: string;
+      body?: string;
       unitPrice?: number;
       leadTimeDays?: number;
+      at?: number;
     }
   // ask the buyer
   | { type: "question.ask"; id: string; questions: AskQuestion[] }
@@ -162,3 +172,24 @@ export type AgentEventType = AgentEvent["type"];
 
 /** Narrow helper: pick the event object for a given type. */
 export type EventOf<T extends AgentEventType> = Extract<AgentEvent, { type: T }>;
+
+/**
+ * What goes on the SSE wire: every AgentEvent is tagged with the runId of the
+ * RFQ it belongs to so the client can route it to the right run-bucket.
+ */
+export type WireEvent = AgentEvent & { runId: string };
+
+/** Snapshot of a run used by the RFQ list page. */
+export interface RunSummary {
+  runId: string;
+  title: string;
+  createdAt: number;
+  status: "researching" | "calling" | "quoted" | "ordered" | "done";
+  request?: RfqRequest;
+  suppliers: number;
+  bestPrice?: number;
+  savings?: number;
+  currency: string;
+  withinBudget?: boolean;
+  ordered: boolean;
+}

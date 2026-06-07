@@ -1,16 +1,39 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
 import type {
-  AgentEvent,
   AskQuestion,
   CallSpeaker,
   Invoice,
   RfqRequest,
+  RunSummary,
   ToolKind,
   ToolStatus,
   Vendor,
+  WireEvent,
 } from "@/lib/events";
 
+export type ViewKey = "rfq" | "dashboard" | "calls" | "suppliers" | "settings";
+export type RailTab = "activity" | "assistant";
+
+const RAIL_WIDTH_KEY = "procura:rail-width";
+const RAIL_TAB_KEY = "procura:rail-tab";
+const VIEW_KEY = "procura:view";
+
+const RAIL_MIN = 320;
+const RAIL_MAX = 720;
+
+function readNumber(key: string, fallback: number): number {
+  if (typeof window === "undefined") return fallback;
+  const raw = window.localStorage.getItem(key);
+  const n = raw == null ? NaN : Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+function readString<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  const raw = window.localStorage.getItem(key);
+  return (allowed as readonly string[]).includes(raw ?? "") ? (raw as T) : fallback;
+}
+
+// ─── Per-run types ────────────────────────────────────────────────────────
 export interface ToolCallItem {
   id: string;
   name: string;
@@ -51,271 +74,481 @@ export interface Summary {
   quotes: number;
 }
 export interface ChatQuestion {
-  qid: string; // server question id, e.g. "q-1"
+  qid: string;
   questions: AskQuestion[];
   answered: boolean;
-  answers?: Record<string, string>; // chosen labels keyed by question text
+  answers?: Record<string, string>;
 }
 export interface ChatMessage {
   id: number;
   role: "user" | "agent";
   text: string;
-  kind?: "text" | "question"; // defaults to "text"
-  question?: ChatQuestion; // present when kind === "question"
+  kind?: "text" | "question";
+  question?: ChatQuestion;
 }
 
-interface AppState {
-  connected: boolean;
+/** A single email captured for a vendor's RFQ thread. */
+export interface VendorEmail {
+  id: number;
+  direction: "out" | "in";
+  to?: string;
+  from?: string;
+  subject?: string;
+  body?: string;
+  unitPrice?: number;
+  leadTimeDays?: number;
+  at: number;
+}
+
+/** Per-vendor archive of every email + every call transcript line we've seen. */
+export interface VendorThread {
+  emails: VendorEmail[];
+  transcript: TranscriptLine[];
+}
+
+/** All per-run state in one bag — what an RFQ pipeline carries from start to finish. */
+export interface RunData {
+  runId: string;
+  title: string;
+  createdAt: number;
   running: boolean;
+  thinking: boolean;
   model?: string;
   apiKeySource?: string;
   request?: RfqRequest;
-  thinking: boolean;
   status?: { phase: string; message?: string };
-
   toolCalls: Record<string, ToolCallItem>;
   toolOrder: string[];
   subagents: Record<string, SubagentItem>;
   subagentOrder: string[];
-
   vendors: Record<string, Vendor>;
   vendorOrder: string[];
+  vendorThreads: Record<string, VendorThread>;
   summary?: Summary;
-
   call: CallState;
   chat: ChatMessage[];
-  chatSplit: number; // fraction of rail height given to the chat panel (0.2–0.8)
+  question: { id: string; questions: AskQuestion[] } | null;
+  order?: { placed: boolean; invoice?: Invoice };
+}
+
+const initialCall: CallState = { active: false, phase: "idle", transcript: [] };
+
+function newRunData(runId: string, title = "New RFQ"): RunData {
+  return {
+    runId,
+    title,
+    createdAt: Date.now(),
+    running: false,
+    thinking: false,
+    toolCalls: {},
+    toolOrder: [],
+    subagents: {},
+    subagentOrder: [],
+    vendors: {},
+    vendorOrder: [],
+    vendorThreads: {},
+    call: { ...initialCall, transcript: [] },
+    chat: [],
+    question: null,
+  };
+}
+
+function pushEmail(r: RunData, vendorId: string, email: VendorEmail): RunData {
+  const prev = r.vendorThreads[vendorId] ?? { emails: [], transcript: [] };
+  return {
+    ...r,
+    vendorThreads: {
+      ...r.vendorThreads,
+      [vendorId]: { ...prev, emails: [...prev.emails, email] },
+    },
+  };
+}
+
+function pushTranscript(
+  r: RunData,
+  vendorId: string,
+  line: TranscriptLine,
+): RunData {
+  const prev = r.vendorThreads[vendorId] ?? { emails: [], transcript: [] };
+  return {
+    ...r,
+    vendorThreads: {
+      ...r.vendorThreads,
+      [vendorId]: { ...prev, transcript: [...prev.transcript, line] },
+    },
+  };
+}
+
+// ─── Top-level state — UI + a mirror of the current run for legacy selectors ──
+interface AppState {
+  connected: boolean;
+  runs: Record<string, RunData>;
+  runOrder: string[]; // newest-first
+  currentRunId?: string;
+  runSummaries: RunSummary[]; // from /api/runs
+
+  // Mirror of runs[currentRunId] — read these from components as before.
+  running: boolean;
+  thinking: boolean;
+  model?: string;
+  apiKeySource?: string;
+  request?: RfqRequest;
+  status?: { phase: string; message?: string };
+  toolCalls: Record<string, ToolCallItem>;
+  toolOrder: string[];
+  subagents: Record<string, SubagentItem>;
+  subagentOrder: string[];
+  vendors: Record<string, Vendor>;
+  vendorOrder: string[];
+  vendorThreads: Record<string, VendorThread>;
+  summary?: Summary;
+  call: CallState;
+  chat: ChatMessage[];
+  question: { id: string; questions: AskQuestion[] } | null;
   order?: { placed: boolean; invoice?: Invoice };
 
-  applyEvents: (events: AgentEvent[]) => void;
-  pushChat: (role: "user" | "agent", text: string) => void;
-  submitAnswer: (qid: string, answers: Record<string, string>) => void;
-  setChatSplit: (frac: number) => void;
+  // UI / nav
+  view: ViewKey;
+  railWidth: number;
+  railTab: RailTab;
+  setView: (v: ViewKey) => void;
+  setRailWidth: (n: number) => void;
+  setRailTab: (t: RailTab) => void;
+
   setConnected: (c: boolean) => void;
-  reset: () => void;
+  setCurrentRunId: (id: string | undefined) => void;
+  ensureRun: (id: string, title?: string) => void;
+  setRunSummaries: (s: RunSummary[]) => void;
+  applyEvents: (events: WireEvent[]) => void;
+  pushChat: (role: "user" | "agent", text: string) => void;
 }
 
 let _seq = 1;
 const nextSeq = () => _seq++;
-const initialCall: CallState = { active: false, phase: "idle", transcript: [] };
+
+/** Pick the fields a component reads — produces the "current run mirror". */
+function mirrorOf(r: RunData): Pick<
+  AppState,
+  | "running"
+  | "thinking"
+  | "model"
+  | "apiKeySource"
+  | "request"
+  | "status"
+  | "toolCalls"
+  | "toolOrder"
+  | "subagents"
+  | "subagentOrder"
+  | "vendors"
+  | "vendorOrder"
+  | "vendorThreads"
+  | "summary"
+  | "call"
+  | "chat"
+  | "question"
+  | "order"
+> {
+  return {
+    running: r.running,
+    thinking: r.thinking,
+    model: r.model,
+    apiKeySource: r.apiKeySource,
+    request: r.request,
+    status: r.status,
+    toolCalls: r.toolCalls,
+    toolOrder: r.toolOrder,
+    subagents: r.subagents,
+    subagentOrder: r.subagentOrder,
+    vendors: r.vendors,
+    vendorOrder: r.vendorOrder,
+    vendorThreads: r.vendorThreads,
+    summary: r.summary,
+    call: r.call,
+    chat: r.chat,
+    question: r.question,
+    order: r.order,
+  };
+}
+
+const emptyMirror = mirrorOf(newRunData("__empty__"));
+
+/** Reducer over one run for one event (everything except agent.text_delta). */
+function applyOne(r: RunData, e: WireEvent): RunData {
+  switch (e.type) {
+    case "agent.ready":
+      return { ...r, model: e.model, apiKeySource: e.apiKeySource, running: true };
+    case "agent.thinking":
+      return { ...r, thinking: e.active };
+    case "status":
+      return { ...r, status: { phase: e.phase, message: e.message } };
+    case "agent.message":
+      return { ...r, chat: [...r.chat, { id: nextSeq(), role: "agent", text: e.text }] };
+    case "done":
+      return { ...r, running: false, thinking: false };
+    case "tool.call": {
+      const toolCalls = {
+        ...r.toolCalls,
+        [e.id]: {
+          id: e.id,
+          name: e.name,
+          label: e.label,
+          kind: e.kind,
+          status: "running" as ToolStatus,
+          subagentId: e.subagentId,
+          seq: nextSeq(),
+        },
+      };
+      const toolOrder = r.toolOrder.includes(e.id) ? r.toolOrder : [...r.toolOrder, e.id];
+      return { ...r, toolCalls, toolOrder };
+    }
+    case "tool.result": {
+      const prev = r.toolCalls[e.id];
+      if (!prev) return r;
+      return { ...r, toolCalls: { ...r.toolCalls, [e.id]: { ...prev, status: e.status, summary: e.summary } } };
+    }
+    case "subagent.spawned": {
+      const subagents = { ...r.subagents, [e.id]: { id: e.id, role: e.role, parentId: e.parentId, done: false } };
+      const subagentOrder = r.subagentOrder.includes(e.id) ? r.subagentOrder : [...r.subagentOrder, e.id];
+      return { ...r, subagents, subagentOrder };
+    }
+    case "subagent.done": {
+      const prev = r.subagents[e.id];
+      if (!prev) return r;
+      return { ...r, subagents: { ...r.subagents, [e.id]: { ...prev, done: true } } };
+    }
+    case "rfq.request": {
+      const title = e.request.item ?? e.request.raw?.slice(0, 80) ?? r.title;
+      return { ...r, request: e.request, title };
+    }
+    case "rfq.supplier_added": {
+      const vendors = { ...r.vendors, [e.vendor.id]: e.vendor };
+      const vendorOrder = r.vendorOrder.includes(e.vendor.id) ? r.vendorOrder : [...r.vendorOrder, e.vendor.id];
+      return { ...r, vendors, vendorOrder };
+    }
+    case "rfq.supplier_updated": {
+      const prev = r.vendors[e.id];
+      if (!prev) return r;
+      return { ...r, vendors: { ...r.vendors, [e.id]: { ...prev, ...e.patch } } };
+    }
+    case "rfq.summary":
+      return {
+        ...r,
+        summary: {
+          headline: e.headline,
+          savings: e.savings,
+          currency: e.currency,
+          withinBudget: e.withinBudget,
+          quotes: e.quotes,
+        },
+      };
+    case "call.ringing": {
+      const call = {
+        active: true,
+        vendorId: e.vendorId,
+        vendorName: e.vendorName,
+        phase: "ringing" as const,
+        transcript: [],
+      };
+      const prev = r.vendors[e.vendorId];
+      const vendors = prev ? { ...r.vendors, [e.vendorId]: { ...prev, status: "calling" as const } } : r.vendors;
+      return { ...r, call, vendors };
+    }
+    case "call.connected":
+      return { ...r, call: { ...r.call, active: true, phase: "connected" } };
+    case "call.transcript": {
+      const line: TranscriptLine = {
+        id: nextSeq(),
+        speaker: e.speaker,
+        text: e.text,
+        final: e.final,
+      };
+      const withCall = {
+        ...r,
+        call: {
+          ...r.call,
+          speaking: e.speaker,
+          transcript: [...r.call.transcript, line],
+        },
+      };
+      // Also archive the line on the vendor thread so it survives past the
+      // current call and renders in the supplier-row expander after hang-up.
+      return pushTranscript(withCall, e.vendorId, line);
+    }
+    case "call.quote": {
+      const call = {
+        ...r.call,
+        quote: { unitPrice: e.unitPrice, currency: e.currency, leadTimeDays: e.leadTimeDays },
+      };
+      const vid = call.vendorId;
+      const prev = vid ? r.vendors[vid] : undefined;
+      const vendors =
+        vid && prev
+          ? {
+              ...r.vendors,
+              [vid]: {
+                ...prev,
+                negotiatedPrice: e.unitPrice,
+                currency: e.currency,
+                leadTimeDays: e.leadTimeDays,
+                status: "negotiating" as const,
+              },
+            }
+          : r.vendors;
+      return { ...r, call, vendors };
+    }
+    case "call.ended":
+      return { ...r, call: { ...r.call, phase: "ended", active: false, outcome: e.outcome, speaking: undefined } };
+    case "email.sent": {
+      const prev = r.vendors[e.vendorId];
+      const withVendor = prev
+        ? {
+            ...r,
+            vendors: {
+              ...r.vendors,
+              [e.vendorId]: {
+                ...prev,
+                status: prev.status === "discovered" ? ("emailing" as const) : prev.status,
+              },
+            },
+          }
+        : r;
+      return pushEmail(withVendor, e.vendorId, {
+        id: nextSeq(),
+        direction: "out",
+        to: e.to,
+        subject: e.subject,
+        body: e.body,
+        at: e.at ?? Date.now(),
+      });
+    }
+    case "email.reply": {
+      const prev = r.vendors[e.vendorId];
+      const withVendor = prev
+        ? {
+            ...r,
+            vendors: {
+              ...r.vendors,
+              [e.vendorId]: {
+                ...prev,
+                status: "quoted" as const,
+                initialPrice: e.unitPrice ?? prev.initialPrice,
+                negotiatedPrice: prev.negotiatedPrice ?? e.unitPrice,
+                leadTimeDays: e.leadTimeDays ?? prev.leadTimeDays,
+              },
+            },
+          }
+        : r;
+      return pushEmail(withVendor, e.vendorId, {
+        id: nextSeq(),
+        direction: "in",
+        from: e.from,
+        subject: e.subject,
+        body: e.body,
+        unitPrice: e.unitPrice,
+        leadTimeDays: e.leadTimeDays,
+        at: e.at ?? Date.now(),
+      });
+    }
+    case "question.ask":
+      return { ...r, question: { id: e.id, questions: e.questions } };
+    case "question.answered":
+      return { ...r, question: null };
+    case "order.placed":
+      return { ...r, order: { placed: true } };
+    case "order.receipt":
+      return { ...r, order: { placed: true, invoice: e.invoice } };
+    case "agent.text_delta":
+      return r;
+  }
+}
 
 export const useStore = create<AppState>()((set) => ({
   connected: false,
-  running: false,
-  thinking: false,
-  toolCalls: {},
-  toolOrder: [],
-  subagents: {},
-  subagentOrder: [],
-  vendors: {},
-  vendorOrder: [],
-  call: initialCall,
-  question: null,
-  chat: [],
+  runs: {},
+  runOrder: [],
+  currentRunId: undefined,
+  runSummaries: [],
+
+  ...emptyMirror,
+
+  view: readString<ViewKey>(VIEW_KEY, ["rfq", "dashboard", "calls", "suppliers", "settings"], "rfq"),
+  railWidth: Math.min(RAIL_MAX, Math.max(RAIL_MIN, readNumber(RAIL_WIDTH_KEY, 380))),
+  railTab: readString<RailTab>(RAIL_TAB_KEY, ["activity", "assistant"], "activity"),
+
+  setView: (v) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(VIEW_KEY, v);
+    set({ view: v });
+  },
+  setRailWidth: (n) => {
+    const clamped = Math.min(RAIL_MAX, Math.max(RAIL_MIN, Math.round(n)));
+    if (typeof window !== "undefined") window.localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
+    set({ railWidth: clamped });
+  },
+  setRailTab: (t) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(RAIL_TAB_KEY, t);
+    set({ railTab: t });
+  },
 
   setConnected: (c) => set({ connected: c }),
-  pushChat: (role, text) =>
-    set((s) => ({ chat: [...s.chat, { id: nextSeq(), role, text }] })),
 
-  reset: () =>
-    set({
-      running: false,
-      thinking: false,
-      request: undefined,
-      status: undefined,
-      toolCalls: {},
-      toolOrder: [],
-      subagents: {},
-      subagentOrder: [],
-      vendors: {},
-      vendorOrder: [],
-      summary: undefined,
-      call: initialCall,
-      question: null,
-      order: undefined,
+  setCurrentRunId: (id) =>
+    set((s) => {
+      if (!id) return { currentRunId: undefined, ...emptyMirror };
+      const r = s.runs[id];
+      if (!r) return { currentRunId: id };
+      return { currentRunId: id, ...mirrorOf(r) };
+    }),
+
+  ensureRun: (id, title) =>
+    set((s) => {
+      if (s.runs[id]) return {};
+      const data = newRunData(id, title);
+      return {
+        runs: { ...s.runs, [id]: data },
+        runOrder: s.runOrder.includes(id) ? s.runOrder : [id, ...s.runOrder],
+      };
+    }),
+
+  setRunSummaries: (rs) => set({ runSummaries: rs }),
+
+  pushChat: (role, text) =>
+    set((s) => {
+      const id = s.currentRunId;
+      if (!id) return {};
+      const prev = s.runs[id];
+      if (!prev) return {};
+      const updated: RunData = {
+        ...prev,
+        chat: [...prev.chat, { id: nextSeq(), role, text }],
+      };
+      const runs = { ...s.runs, [id]: updated };
+      return { runs, ...mirrorOf(updated) };
     }),
 
   applyEvents: (events) =>
     set((s) => {
-      const toolCalls = { ...s.toolCalls };
-      let toolOrder = s.toolOrder;
-      const subagents = { ...s.subagents };
-      let subagentOrder = s.subagentOrder;
-      const vendors = { ...s.vendors };
-      let vendorOrder = s.vendorOrder;
-      let call = s.call;
-      let chat = s.chat;
-      const patch: Partial<AppState> = {};
-
+      let runs = s.runs;
+      let runOrder = s.runOrder;
+      const touched = new Set<string>();
       for (const e of events) {
-        switch (e.type) {
-          case "agent.ready":
-            patch.model = e.model;
-            patch.apiKeySource = e.apiKeySource;
-            patch.connected = true;
-            patch.running = true;
-            break;
-          case "agent.thinking":
-            patch.thinking = e.active;
-            break;
-          case "status":
-            patch.status = { phase: e.phase, message: e.message };
-            break;
-          case "agent.message":
-            chat = [...chat, { id: nextSeq(), role: "agent", text: e.text }];
-            break;
-          case "done":
-            patch.running = false;
-            patch.thinking = false;
-            break;
-
-          case "tool.call":
-            toolCalls[e.id] = {
-              id: e.id,
-              name: e.name,
-              label: e.label,
-              kind: e.kind,
-              status: "running" as ToolStatus,
-              subagentId: e.subagentId,
-              seq: nextSeq(),
-            };
-            if (!toolOrder.includes(e.id)) toolOrder = [...toolOrder, e.id];
-            break;
-          case "tool.result": {
-            const t = toolCalls[e.id];
-            if (t) toolCalls[e.id] = { ...t, status: e.status, summary: e.summary };
-            break;
-          }
-          case "subagent.spawned":
-            subagents[e.id] = { id: e.id, role: e.role, parentId: e.parentId, done: false };
-            if (!subagentOrder.includes(e.id)) subagentOrder = [...subagentOrder, e.id];
-            break;
-          case "subagent.done": {
-            const sa = subagents[e.id];
-            if (sa) subagents[e.id] = { ...sa, done: true };
-            break;
-          }
-
-          case "rfq.request":
-            patch.request = e.request;
-            break;
-          case "rfq.supplier_added":
-            vendors[e.vendor.id] = e.vendor;
-            if (!vendorOrder.includes(e.vendor.id)) vendorOrder = [...vendorOrder, e.vendor.id];
-            break;
-          case "rfq.supplier_updated": {
-            const v = vendors[e.id];
-            if (v) vendors[e.id] = { ...v, ...e.patch };
-            break;
-          }
-          case "rfq.summary":
-            patch.summary = {
-              headline: e.headline,
-              savings: e.savings,
-              currency: e.currency,
-              withinBudget: e.withinBudget,
-              quotes: e.quotes,
-            };
-            break;
-
-          case "call.ringing": {
-            call = {
-              active: true,
-              vendorId: e.vendorId,
-              vendorName: e.vendorName,
-              phase: "ringing",
-              transcript: [],
-            };
-            const v = vendors[e.vendorId];
-            if (v) vendors[e.vendorId] = { ...v, status: "calling" };
-            break;
-          }
-          case "call.connected":
-            call = { ...call, active: true, phase: "connected" };
-            break;
-          case "call.transcript":
-            call = {
-              ...call,
-              speaking: e.speaker,
-              transcript: [
-                ...call.transcript,
-                { id: nextSeq(), speaker: e.speaker, text: e.text, final: e.final },
-              ],
-            };
-            break;
-          case "call.quote": {
-            call = {
-              ...call,
-              quote: { unitPrice: e.unitPrice, currency: e.currency, leadTimeDays: e.leadTimeDays },
-            };
-            const vid = call.vendorId;
-            const v = vid ? vendors[vid] : undefined;
-            if (vid && v)
-              vendors[vid] = {
-                ...v,
-                negotiatedPrice: e.unitPrice,
-                currency: e.currency,
-                leadTimeDays: e.leadTimeDays,
-                status: "negotiating",
-              };
-            break;
-          }
-          case "call.ended":
-            call = { ...call, phase: "ended", active: false, outcome: e.outcome, speaking: undefined };
-            break;
-
-          case "email.sent": {
-            const v = vendors[e.vendorId];
-            if (v)
-              vendors[e.vendorId] = {
-                ...v,
-                status: v.status === "discovered" ? "emailing" : v.status,
-              };
-            break;
-          }
-          case "email.reply": {
-            const v = vendors[e.vendorId];
-            if (v)
-              vendors[e.vendorId] = {
-                ...v,
-                status: "quoted",
-                initialPrice: e.unitPrice ?? v.initialPrice,
-                negotiatedPrice: v.negotiatedPrice ?? e.unitPrice,
-                leadTimeDays: e.leadTimeDays ?? v.leadTimeDays,
-              };
-            break;
-          }
-
-          case "question.ask":
-            patch.question = { id: e.id, questions: e.questions };
-            break;
-          case "question.answered":
-            patch.question = null;
-            break;
-
-          case "order.placed":
-            patch.order = { placed: true };
-            break;
-          case "order.receipt":
-            patch.order = { placed: true, invoice: e.invoice };
-            break;
-
-          case "agent.text_delta":
-            // streamed thinking text — not surfaced as chat; ignored here
-            break;
+        const id = e.runId;
+        if (!id) continue;
+        let r = runs[id];
+        if (!r) {
+          r = newRunData(id);
+          runOrder = runOrder.includes(id) ? runOrder : [id, ...runOrder];
+        }
+        const next = applyOne(r, e);
+        if (next !== r) {
+          runs = { ...runs, [id]: next };
+          touched.add(id);
         }
       }
-
-      return {
-        ...patch,
-        toolCalls,
-        toolOrder,
-        subagents,
-        subagentOrder,
-        vendors,
-        vendorOrder,
-        call,
-        chat,
-      };
+      const partial: Partial<AppState> = { runs, runOrder };
+      const cur = s.currentRunId;
+      if (cur && touched.has(cur) && runs[cur]) {
+        Object.assign(partial, mirrorOf(runs[cur]!));
+      }
+      return partial;
     }),
 }));

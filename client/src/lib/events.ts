@@ -134,13 +134,23 @@ export type AgentEvent =
       leadTimeDays: number;
     }
   | { type: "call.ended"; vendorId: string; outcome: "success" | "failed" | "no-answer" }
-  | { type: "email.sent"; vendorId: string; to: string; subject: string }
+  | {
+      type: "email.sent";
+      vendorId: string;
+      to: string;
+      subject: string;
+      body?: string;
+      at?: number;
+    }
   | {
       type: "email.reply";
       vendorId: string;
       from: string;
+      subject?: string;
+      body?: string;
       unitPrice?: number;
       leadTimeDays?: number;
+      at?: number;
     }
   | { type: "question.ask"; id: string; questions: AskQuestion[] }
   | { type: "question.answered"; id: string; answers: Record<string, string> }
@@ -149,3 +159,20 @@ export type AgentEvent =
 
 export type AgentEventType = AgentEvent["type"];
 export type EventOf<T extends AgentEventType> = Extract<AgentEvent, { type: T }>;
+
+/** Wire format on the SSE stream — every event carries the runId it belongs to. */
+export type WireEvent = AgentEvent & { runId: string };
+
+export interface RunSummary {
+  runId: string;
+  title: string;
+  createdAt: number;
+  status: "researching" | "calling" | "quoted" | "ordered" | "done";
+  request?: RfqRequest;
+  suppliers: number;
+  bestPrice?: number;
+  savings?: number;
+  currency: string;
+  withinBudget?: boolean;
+  ordered: boolean;
+}

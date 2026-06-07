@@ -1,11 +1,11 @@
 import { useEffect } from "react";
 import { useStore } from "@/store";
-import type { AgentEvent } from "@/lib/events";
+import type { WireEvent } from "@/lib/events";
 
 /**
- * Subscribe to the server's SSE event stream. Events are buffered and flushed
- * once per animation frame into a single batched store update — this prevents
- * re-render storms when many events arrive at once (e.g. a burst of tool calls).
+ * Subscribe to the server's SSE event stream. Every event carries `runId`; the
+ * store routes it to the correct run-bucket. Events are batched per animation
+ * frame so a burst of updates produces a single render.
  */
 export function useAgentStream(): void {
   const setConnected = useStore((s) => s.setConnected);
@@ -13,7 +13,7 @@ export function useAgentStream(): void {
 
   useEffect(() => {
     const es = new EventSource("/events");
-    let buffer: AgentEvent[] = [];
+    let buffer: WireEvent[] = [];
     let raf = 0;
 
     const flush = () => {
@@ -29,7 +29,7 @@ export function useAgentStream(): void {
     es.onmessage = (ev: MessageEvent<string>) => {
       if (!ev.data) return;
       try {
-        const parsed = JSON.parse(ev.data) as AgentEvent | AgentEvent[];
+        const parsed = JSON.parse(ev.data) as WireEvent | WireEvent[];
         if (Array.isArray(parsed)) buffer.push(...parsed);
         else buffer.push(parsed);
       } catch {
