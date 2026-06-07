@@ -1,0 +1,9 @@
+{
+  "office chairs": [
+    { "id": "seed_chairs_1", "name": "ErgoWorks Distribution", "contact": "sales@ergoworks.example", "site": "ergoworks.example", "listPrice": 84, "floorPrice": 72, "persona": "friendly regional distributor, moderate flexibility", "leadTime": "3 weeks" },
+    { "id": "seed_chairs_2", "name": "SeatSource Wholesale", "contact": "rfq@seatsource.example", "site": "seatsource.example", "listPrice": 79, "floorPrice": 70, "persona": "high-volume wholesaler, eager to close", "leadTime": "4 weeks" },
+    { "id": "seed_chairs_3", "name": "Nordic Office Co", "contact": "b2b@nordicoffice.example", "site": "nordicoffice.example", "listPrice": 95, "floorPrice": 85, "persona": "premium brand, low flexibility", "leadTime": "2 weeks" },
+    { "id": "seed_chairs_4", "name": "BulkSeats Direct", "contact": "quotes@bulkseats.example", "site": "bulkseats.example", "listPrice": 82, "floorPrice": 71, "persona": "factory-direct, stubborn then folds on volume", "leadTime": "5 weeks" }
+  ],
+  "_note": "Generic seed list keyed by product category. Add categories as needed. floorPrice and persona are supplier-simulator-internal; never expose to the buyer."
+}

@@ -1,0 +1,20 @@
+{
+  "id": "run_sample",
+  "need": { "product": "Ergonomic office chairs", "quantity": 500, "specs": "mesh back, adjustable lumbar, 5yr frame warranty", "region": "EU", "targetPrice": 74, "budgetPrice": 90 },
+  "status": "done",
+  "startedAt": "2026-06-07T09:00:00Z",
+  "finishedAt": "2026-06-07T09:06:00Z",
+  "suppliers": [
+    { "id": "sup_1", "name": "ErgoWorks Distribution", "source": "seed", "fitScore": 88,
+      "quote": { "unitPrice": 84, "quantity": 500, "leadTime": "3w", "paymentTerms": "net-30", "landedUnit": 86 },
+      "negotiationRounds": [
+        { "channel": "email", "offer": 71, "counter": 80, "ts": "2026-06-07T09:03:00Z", "rationale": "competing quote + 500 units" },
+        { "channel": "voice", "offer": 73, "counter": 76, "ts": "2026-06-07T09:05:00Z" },
+        { "channel": "voice", "offer": 74, "counter": 74, "ts": "2026-06-07T09:05:40Z" }
+      ] }
+  ],
+  "baselineTotal": 43000,
+  "ranking": ["sup_1"],
+  "deal": { "supplierId": "sup_1", "finalUnit": 74, "finalTotal": 37000, "savings": 6000, "pct": 0.14, "verified": true },
+  "metrics": { "suppliersContacted": 4, "quotesReceived": 4, "rounds": 3, "elapsedMs": 360000, "humanBaselineHours": 24 }
+}
