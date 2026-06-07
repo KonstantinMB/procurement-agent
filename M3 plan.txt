@@ -1,7 +1,7 @@
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  AI Procurement Officer — Hackathon Build Plan
 
- ▎ Working title (swap freely): "Atlas" — an autonomous AI procurement officer you brief in one sentence, that finds suppliers, calls and negotiates by voice live, emails RFQs, fills a real-time comparison dashboard, and closes the deal on one
+ ▎ Working title (swap freely): "Procura" — an autonomous AI procurement officer you brief in one sentence, that finds suppliers, calls and negotiates by voice live, emails RFQs, fills a real-time comparison dashboard, and closes the deal on one
  ▎ button.
 
  Context
@@ -191,7 +191,7 @@
  Persistent left sidebar nav (white, hairline right border, custom-SVG logo + nav items, brand-tint highlight on the active item) · white top bar holding the command bar · center work area (headline metrics → swarm graph → RFQ board; call panel
  slides up over the board) · right live activity panel (collapsible). Desktop-first (judges watch on a big screen).
  ┌──────────────┬──────────────────────────────────────────────┬───────────────┐
- │ ◆ Atlas      │  ⌘ "50 brushless motors by Fri <€60/unit" [Run]│ LIVE ACTIVITY │ white top bar
+ │ ◆ Procura      │  ⌘ "50 brushless motors by Fri <€60/unit" [Run]│ LIVE ACTIVITY │ white top bar
  │ (SVG logo)   ├──────────────────────────────────────────────┤ ● searching…  │
  │ ◇ New RFQ    │  €412 SAVED · ✅ within budget · 4 quotes      │ ▸ calling Acme│ NumberFlow
  │ ▦ Dashboard  │  ┌ SWARM GRAPH (custom-SVG nodes) ───────────┐ │ ✓ quote Bolt  │

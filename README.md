@@ -1,59 +1,36 @@
-# AI Procurement Agent — Claude Code Orchestration
+# Procura — AI Procurement Officer
 
-An autonomous procurement "employee" built as a Claude Code orchestration: one **orchestrator**
-coordinating specialized **subagents**, backed by reusable **skills**. The buyer states a need; the
-system sources suppliers, sends RFQs, negotiates over email and a live AI-vs-AI phone call, tracks
-everything in realtime, and reports verified savings.
+Brief it in one sentence — *"I need 50 brushless motors delivered by Friday under €60/unit"* — and Procura runs the whole procurement cycle live: searches the web for suppliers (a sub-agent swarm), **calls a supplier and negotiates by voice**, emails RFQs, fills a real-time comparison dashboard, and closes the deal on one **Order Now** button. The entire UI is a live projection of a server event stream.
 
-## Layout
+Built on the **Claude Agent SDK** (Opus 4.8, `effort: max`) with **Vapi** for the live phone call (Claude as the brain, ElevenLabs voice).
+
+## Stack
+- **Client:** Vite + React 19 + TypeScript + Tailwind v4, `motion`, `@xyflow/react` (swarm graph), `@number-flow/react`, `canvas-confetti`, `zustand`. SSE for live updates.
+- **Server:** Hono (Node) running the Claude Agent SDK headless; in-process MCP tools; Vapi + Nodemailer integrations. One typed event bus → SSE.
+
+## Run
+```bash
+# from the project root
+npm --prefix server install && npm --prefix client install   # first time
+npm run dev                                                   # starts both (server :8787, client :5173)
 ```
-procurement-agent/
-├── CLAUDE.md                      # Orchestrator brain — runs the full pipeline
-├── .claude/
-│   ├── agents/                    # Subagents (invoked by the orchestrator)
-│   │   ├── supplier-sourcer.md    # web + seed -> ranked supplier list
-│   │   ├── rfq-writer.md          # personalized RFQ per supplier
-│   │   ├── supplier-simulator.md  # plays the SUPPLIER (hidden floor) — demo-safe
-│   │   ├── quote-analyst.md       # parse/normalize quotes, owns the savings metric
-│   │   ├── email-negotiator.md    # email counteroffer rounds
-│   │   ├── voice-negotiator.md    # live Vapi AI-vs-AI phone close (the WOW)
-│   │   └── proposal-writer.md     # buyer-facing deal summary
-│   └── skills/                    # Reusable know-how
-│       ├── negotiation-playbook/  # anchoring, concessions, walk-away
-│       ├── rfq-generation/        # how to write RFQs
-│       ├── supplier-sourcing/     # find + vet suppliers
-│       ├── savings-tracking/      # state schema + savings math (monitored result)
-│       └── vapi-voice/            # set up + trigger the AI-vs-AI call
-├── data/seed-suppliers.json       # demo-safe supplier seed list (w/ hidden floors)
-└── state/                         # run state (single source of truth) + proposals
-    └── run-sample.json            # example completed run
-```
+Open http://localhost:5173 and click **Try demo** (or type a request and hit Run).
 
-## How orchestration works
-1. Drop this folder into your repo (or point Claude Code at it). The orchestrator reads `CLAUDE.md`.
-2. Give it a need: *"Source 500 ergonomic office chairs, EU, budget $90/unit, target $74."*
-3. The orchestrator calls subagents in order, writing progress to `state/run-<id>.json` after each step.
-4. Subagents pull tactics from the skills automatically.
-5. The Next.js dashboard polls the state file (or a DB mirror) and renders the live result.
+> Run the servers separately if you prefer: `npm run dev:server` and `npm run dev:client`.
 
-Pipeline: **sourcer -> rfq-writer -> (send) -> supplier-simulator (quotes) -> quote-analyst
-(baseline) -> email-negotiator -> voice-negotiator -> quote-analyst (verify) -> proposal-writer**
+## Two modes
+- **Demo mode (default):** a fully scripted, deterministic run — zero external dependencies, perfect for the stage. `Try demo` or any request triggers it.
+- **Real mode:** set `AGENT_MODE=real` in `server/.env` to drive the live Claude Agent SDK (real web-search sub-agents, real Vapi call, real Gmail). Auth comes from your logged-in `claude` CLI — no `ANTHROPIC_API_KEY` needed. Provide the keys below for the side-effects you want live; anything unconfigured gracefully **simulates** (still emits realistic events).
 
-## Demo-safety design
-- The **supplier side is controlled** (`supplier-simulator` + seed floors), so negotiations are real
-  *and* reproducible — no dependence on real businesses answering mid-demo.
-- Hybrid sourcing: live web search proves capability; the seed list guarantees the demo runs.
-- Voice has a recorded-transcript **fallback** path through the same UI.
+## Environment (`server/.env`, see `server/.env.example`)
+| Var | Purpose |
+|---|---|
+| `AGENT_MODE=real` | Switch the command bar from demo → live agent |
+| `VAPI_API_KEY`, `VAPI_ASSISTANT_ID`, `VAPI_PHONE_NUMBER_ID`, `VAPI_WEBHOOK_SECRET` | Live phone call (Vapi: Claude LLM + ElevenLabs voice). Webhook: `POST /webhooks/vapi` |
+| `ELEVENLABS_API_KEY` | Voice (configured inside Vapi) |
+| `GMAIL_USER`, `GMAIL_APP_PASSWORD` | Real RFQ emails via Nodemailer |
+| `TWILIO_*` | Only if bringing your own number into Vapi |
+| `OPENAI_API_KEY` | Optional (Vapi's default transcriber suffices) |
 
-## The monitored result
-Defined in `skills/savings-tracking`: `$ saved`, `% off baseline`, and `elapsed vs human baseline`,
-all recomputed and **verified** before reporting. Wire these to an animated counter on the dashboard.
-
-## To run the voice piece
-Set up two Vapi assistants (procurement + supplier) per `skills/vapi-voice/SKILL.md`, set
-`VAPI_API_KEY`, and point the webhook at your Next.js `/api/vapi/webhook`. Retell/Bland work with the
-same pattern.
-
-## Env you'll likely need
-`ANTHROPIC_API_KEY` (or your LLM), `VAPI_API_KEY`, `RESEND_API_KEY` (or Gmail), and a DB URL if you
-mirror state to Supabase/sqlite for the dashboard.
+## How the live showcase works
+The agent drives the dashboard **through its tool calls** — `add_supplier`, `update_quote`, `call_supplier`, `send_rfq_email` — each handler emits a typed event onto the bus, which streams to the browser over SSE and animates the swarm graph, the RFQ board, the activity feed, and the cinematic call panel in real time. See `docs/CONTRACTS.md` for the full event contract and `/Users/mac/.claude/plans/…-tender-turing.md` for the design.

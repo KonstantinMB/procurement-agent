@@ -1,0 +1,15 @@
+{
+  "name": "procura-procurement",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Procura — autonomous AI procurement officer (hackathon)",
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,green \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "install:all": "npm --prefix server install && npm --prefix client install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
