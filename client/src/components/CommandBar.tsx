@@ -12,8 +12,6 @@ const PLACEHOLDER =
 
 export type CommandBarVariant = "topbar" | "hero";
 
-const LAYOUT_ID = "prompt-shell";
-
 interface Props {
   variant?: CommandBarVariant;
 }
@@ -52,11 +50,17 @@ export default function CommandBar({ variant = "topbar" }: Props) {
     : "inline-flex h-9 shrink-0 items-center gap-1 rounded-lg bg-brand px-4 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:opacity-50";
   const iconSize = isHero ? "h-[18px] w-[18px]" : "h-4 w-4";
 
+  // We used to share a `layoutId` between the hero and top-bar variants so the
+  // input morphed between positions. That broke when the user navigated back
+  // RFQ → hero — motion captured the form mid-AnimatePresence-exit and the
+  // input never reappeared on the hero. Plain mount/fade is reliable both
+  // ways; we lose the morph but gain a working back-nav.
   return (
     <motion.form
-      layoutId={LAYOUT_ID}
       onSubmit={onSubmit}
       transition={SPRING}
+      initial={isHero ? { opacity: 0, y: 8 } : false}
+      animate={isHero ? { opacity: 1, y: 0 } : { opacity: 1 }}
       className="w-full"
     >
       <div className={shellCls}>

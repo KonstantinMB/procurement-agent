@@ -1,5 +1,4 @@
 import { motion } from "motion/react";
-import { Sparkles } from "lucide-react";
 import Logo from "./Logo";
 import CommandBar from "./CommandBar";
 import PeekSheet from "./PeekSheet";
@@ -68,17 +67,6 @@ export default function HomeHero() {
         transition={{ duration: 0.45, ease: HERO_EASE, delay: 0.05 }}
         className="relative z-10 flex w-full max-w-2xl flex-col items-center gap-7 px-6 pb-32"
       >
-        {/* Eyebrow chip */}
-        <motion.span
-          initial={{ y: 8, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.15, duration: 0.4, ease: HERO_EASE }}
-          className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-muted shadow-[var(--shadow-card)]"
-        >
-          <Sparkles size={12} className="text-brand" strokeWidth={2.4} />
-          <span className="tracking-wide">Built on Claude · Agent SDK</span>
-        </motion.span>
-
         {/* Logo + Wordmark + tagline */}
         <div className="flex flex-col items-center gap-5 text-center">
           <div className="flex flex-col items-center gap-3">

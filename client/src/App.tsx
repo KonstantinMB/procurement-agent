@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Toaster } from "sonner";
-import { AnimatePresence, LayoutGroup, motion } from "motion/react";
+import { AnimatePresence, motion } from "motion/react";
 import { useAgentStream } from "@/lib/sse";
 import Sidebar from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
@@ -106,41 +106,39 @@ export default function App() {
       <Sidebar />
 
       <div className="relative flex min-w-0 flex-1 flex-col">
-        <LayoutGroup>
-          <AnimatePresence initial={false}>
-            {!showHero && (
+        <AnimatePresence initial={false}>
+          {!showHero && (
+            <motion.div
+              key="topbar"
+              initial={{ y: -64, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: -64, opacity: 0 }}
+              transition={{ duration: 0.45, ease: EASE }}
+            >
+              <TopBar />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="relative flex min-h-0 flex-1">
+          <AnimatePresence mode="wait" initial={false}>
+            {showHero ? (
+              <HomeHero key="hero" />
+            ) : (
               <motion.div
-                key="topbar"
-                initial={{ y: -64, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: -64, opacity: 0 }}
-                transition={{ duration: 0.45, ease: EASE }}
+                key="workspace"
+                initial={{ opacity: 0, y: 18 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 12 }}
+                transition={{ duration: 0.5, ease: EASE, delay: 0.08 }}
+                className="flex min-h-0 min-w-0 flex-1"
               >
-                <TopBar />
+                <CurrentView />
+                {showRail && <RightRail />}
               </motion.div>
             )}
           </AnimatePresence>
-
-          <div className="relative flex min-h-0 flex-1">
-            <AnimatePresence mode="popLayout" initial={false}>
-              {showHero ? (
-                <HomeHero key="hero" />
-              ) : (
-                <motion.div
-                  key="workspace"
-                  initial={{ opacity: 0, y: 18 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 12 }}
-                  transition={{ duration: 0.5, ease: EASE, delay: 0.12 }}
-                  className="flex min-h-0 min-w-0 flex-1"
-                >
-                  <CurrentView />
-                  {showRail && <RightRail />}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </LayoutGroup>
+        </div>
       </div>
 
       <OrderNow />
