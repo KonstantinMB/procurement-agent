@@ -1,16 +1,25 @@
 import type { Invoice, RfqRequest, Vendor } from "./events";
 
-/**
- * Server-side mirror of the RFQ so endpoints can compute the winner, savings,
- * and the final invoice. The browser holds the authoritative UI state; this is
- * just enough for order/summary logic.
- */
-class RfqState {
+/** Per-RFQ state. Each concurrent RFQ run has its own instance. */
+export class RfqState {
+  readonly runId: string;
+  readonly createdAt: number;
+  title: string;
   request: RfqRequest | undefined;
   vendors = new Map<string, Vendor>();
+  ordered: { vendorId: string; invoice: Invoice } | undefined;
+  done = false;
+
+  constructor(runId: string, title = "New RFQ") {
+    this.runId = runId;
+    this.createdAt = Date.now();
+    this.title = title;
+  }
 
   setRequest(r: RfqRequest): void {
     this.request = r;
+    if (r.item) this.title = r.item;
+    else if (r.raw) this.title = r.raw.slice(0, 80);
   }
   upsertVendor(v: Vendor): void {
     this.vendors.set(v.id, v);
@@ -25,16 +34,11 @@ class RfqState {
   all(): Vendor[] {
     return [...this.vendors.values()];
   }
-  reset(): void {
-    this.request = undefined;
-    this.vendors.clear();
-  }
 
   private priceOf(v: Vendor): number | undefined {
     return v.negotiatedPrice ?? v.initialPrice;
   }
 
-  /** Cheapest vendor that still meets the deadline (falls back to cheapest). */
   bestVendor(): Vendor | undefined {
     const priced = this.all().filter((v) => this.priceOf(v) != null);
     const onTime = priced
@@ -75,6 +79,41 @@ class RfqState {
       date: new Date().toISOString(),
     };
   }
+
+  /** Coarse status used by the RFQ list page. */
+  derivedStatus(): "researching" | "calling" | "quoted" | "ordered" | "done" {
+    if (this.ordered) return "ordered";
+    const list = this.all();
+    if (list.some((v) => v.status === "calling" || v.status === "negotiating")) return "calling";
+    if (list.some((v) => v.status === "won" || v.status === "quoted")) return "quoted";
+    if (this.done) return "done";
+    return "researching";
+  }
 }
 
-export const rfq = new RfqState();
+/** Owns every concurrent RFQ run. */
+class RfqRegistry {
+  private runs = new Map<string, RfqState>();
+
+  create(runId: string, title?: string): RfqState {
+    const state = new RfqState(runId, title);
+    this.runs.set(runId, state);
+    return state;
+  }
+  get(runId: string): RfqState | undefined {
+    return this.runs.get(runId);
+  }
+  getOrThrow(runId: string): RfqState {
+    const s = this.runs.get(runId);
+    if (!s) throw new Error(`Unknown runId ${runId}`);
+    return s;
+  }
+  delete(runId: string): void {
+    this.runs.delete(runId);
+  }
+  all(): RfqState[] {
+    return [...this.runs.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }
+}
+
+export const rfqs = new RfqRegistry();

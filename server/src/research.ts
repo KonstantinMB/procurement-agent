@@ -42,17 +42,26 @@ export interface ResearchHandlers {
 }
 
 function buildPrompt(a: ResearchArgs): string {
-  const count = a.count ?? 4;
+  const count = a.count ?? 2;
   const region = a.region ? ` based in or shipping to ${a.region}` : "";
   const qty = a.quantity ? ` The buyer needs about ${a.quantity} units.` : "";
   const cur = a.currency ? ` Prefer prices in ${a.currency}.` : "";
   return [
-    `You are a procurement research assistant. Use web search to find ${count} REAL, currently-operating suppliers, distributors, or stockists of "${a.item}"${region}.${qty}`,
-    `For each, find: name; location (city, country); a real contact — phone preferred (the buyer will call), else email, else website URL; MOQ if stated; and a public/list unit price if shown online.${cur} Verify each via web search/fetch — never invent companies, contacts, or prices.`,
+    `You are a FAST procurement scout. Find ${count} REAL, currently-operating suppliers, distributors, or stockists of "${a.item}"${region}.${qty}`,
     ``,
-    `IMPORTANT — stream your results: the MOMENT you verify a supplier, output it on its own line, immediately, before researching the next, in EXACTLY this form:`,
+    `SPEED RULES — emit each supplier the instant you have it, do NOT batch:`,
+    `- Run ONE broad WebSearch. That's it — no second search unless the first returned nothing usable.`,
+    `- Emit the FIRST credible supplier as a SUPPLIER: line IMMEDIATELY from the search snippet alone — name + a contact (phone / email / url) is enough.`,
+    `- Only WebFetch a URL if a key field (name OR any of phone/email/url) is completely missing from the snippet. Never to "verify" or "double-check" or "grab the latest price".`,
+    `- After WebFetch (when needed) emit the supplier SUPPLIER: line right away. Do not over-research.`,
+    `- The MOMENT you have ${count} suppliers, STOP. No further searches, no further fetches, no closing essay.`,
+    ``,
+    `For each supplier capture: name; location (city, country); a real contact — phone preferred (the buyer will call), else email, else website URL; MOQ if stated; and a public/list unit price if shown.${cur} Never invent companies, contacts, or prices — if you don't have a value, OMIT the field.`,
+    ``,
+    `STREAM YOUR RESULTS — each supplier on its own line BEFORE moving to the next, in EXACTLY this form:`,
     `SUPPLIER: {"name":"…","location":"…","phone":"…","email":"…","url":"…","moq":0,"unitPrice":0}`,
-    `(one compact JSON object on a single line; omit any key you don't have; unitPrice must be a number). Do this for each of the ${count} suppliers as you go.`,
+    `(one compact JSON object on a single line; omit any key you don't have; unitPrice must be a number).`,
+    `Target: ${count} suppliers, finished as fast as possible.`,
   ].join("\n");
 }
 
