@@ -44,6 +44,8 @@ export async function sendRfqEmail(args: EmailArgs): Promise<void> {
     vendorId: args.vendorId,
     to: args.to,
     subject: args.subject,
+    body: args.body,
+    at: Date.now(),
   });
   const r = rfqs.get(runId);
   if (r) r.patchVendor(args.vendorId, { status: "emailing" });
@@ -82,7 +84,31 @@ export async function sendRfqEmail(args: EmailArgs): Promise<void> {
     setTimeout(() => {
       try {
         const { unitPrice, leadTimeDays, meetsDeadline } = simulatedQuote(runId, vendorId);
-        bus.emit(runId, { type: "email.reply", vendorId, from, unitPrice, leadTimeDays });
+        const r2 = rfqs.get(runId);
+        const vendorName = r2?.get(vendorId)?.name ?? "Supplier";
+        const cur = r2?.request?.currency ?? "EUR";
+        const replySubject = `Re: ${args.subject}`;
+        const replyBody = [
+          `Hello,`,
+          ``,
+          `Thank you for your enquiry. Based on the volume you mentioned we can offer ${unitPrice} ${cur} per unit, delivered in approximately ${leadTimeDays} business days.`,
+          ``,
+          `This price assumes confirmation within the next 5 business days and payment on Net 30 terms. Let us know if you'd like to proceed or discuss further.`,
+          ``,
+          `Best regards,`,
+          `${vendorName} Sales`,
+        ].join("\n");
+
+        bus.emit(runId, {
+          type: "email.reply",
+          vendorId,
+          from,
+          subject: replySubject,
+          body: replyBody,
+          unitPrice,
+          leadTimeDays,
+          at: Date.now(),
+        });
         const patch = {
           status: "quoted" as const,
           initialPrice: unitPrice,
@@ -90,7 +116,6 @@ export async function sendRfqEmail(args: EmailArgs): Promise<void> {
           leadTimeDays,
           meetsDeadline,
         };
-        const r2 = rfqs.get(runId);
         if (r2) r2.patchVendor(vendorId, patch);
         bus.emit(runId, { type: "rfq.supplier_updated", id: vendorId, patch });
       } catch {

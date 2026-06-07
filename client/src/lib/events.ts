@@ -134,13 +134,23 @@ export type AgentEvent =
       leadTimeDays: number;
     }
   | { type: "call.ended"; vendorId: string; outcome: "success" | "failed" | "no-answer" }
-  | { type: "email.sent"; vendorId: string; to: string; subject: string }
+  | {
+      type: "email.sent";
+      vendorId: string;
+      to: string;
+      subject: string;
+      body?: string;
+      at?: number;
+    }
   | {
       type: "email.reply";
       vendorId: string;
       from: string;
+      subject?: string;
+      body?: string;
       unitPrice?: number;
       leadTimeDays?: number;
+      at?: number;
     }
   | { type: "question.ask"; id: string; questions: AskQuestion[] }
   | { type: "question.answered"; id: string; answers: Record<string, string> }

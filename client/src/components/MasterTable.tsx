@@ -1,12 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import NumberFlow from "@number-flow/react";
-import { Phone, Mail, Globe, Check, X, Star, Search } from "lucide-react";
+import {
+  Phone,
+  Mail,
+  Globe,
+  Check,
+  X,
+  Star,
+  Search,
+  ChevronRight,
+  MessageSquare,
+} from "lucide-react";
 import { useStore } from "@/store";
 import { SPRING_SNAPPY, formatMoney } from "@/lib/motion";
 import type { Vendor, VendorStatus } from "@/lib/events";
 import RowOrderButton from "./RowOrderButton";
 import WarmupCanvas from "./WarmupCanvas";
+import VendorThread from "./VendorThread";
 
 // ─── status → label + pill classes ────────────────────────────────────────
 const STATUS: Record<VendorStatus, { label: string; cls: string; live?: boolean }> = {
@@ -128,11 +139,26 @@ const COLS = [
   { k: "action", label: "Action", num: false, w: "w-[90px]" },
 ];
 
-function VendorRow({ id, index }: { id: string; index: number }) {
+function VendorRow({
+  id,
+  index,
+  expanded,
+  onToggle,
+}: {
+  id: string;
+  index: number;
+  expanded: boolean;
+  onToggle: (id: string) => void;
+}) {
   const v = useStore((s) => s.vendors[id]);
+  const thread = useStore((s) => s.vendorThreads[id]);
   const flashNeg = useFlash(v?.negotiatedPrice);
   const flashStatus = useFlash(v?.status);
   if (!v) return null;
+
+  const emailCount = thread?.emails.length ?? 0;
+  const transcriptCount = thread?.transcript.length ?? 0;
+  const hasThread = emailCount > 0 || transcriptCount > 0;
 
   const active = v.status === "calling" || v.status === "negotiating";
   const won = v.status === "won";
@@ -155,9 +181,22 @@ function VendorRow({ id, index }: { id: string; index: number }) {
       animate={{ opacity: lost ? 0.55 : 1, y: 0 }}
       exit={{ opacity: 0 }}
       transition={SPRING_SNAPPY}
-      className={`${rowBg} ${active ? "shadow-[inset_2px_0_0_0_var(--color-brand)]" : won ? "shadow-[inset_2px_0_0_0_var(--color-success)]" : ""} hover:bg-hover/60`}
+      onClick={() => onToggle(id)}
+      className={`cursor-pointer ${rowBg} ${active ? "shadow-[inset_2px_0_0_0_var(--color-brand)]" : won ? "shadow-[inset_2px_0_0_0_var(--color-success)]" : ""} hover:bg-hover/60`}
     >
-      <td className={`${tdNum} text-faint`}>{index + 1}</td>
+      <td className={`${tdNum} text-faint`}>
+        <span className="inline-flex items-center justify-end gap-1">
+          <motion.span
+            animate={{ rotate: expanded ? 90 : 0 }}
+            transition={{ duration: 0.18 }}
+            className="inline-flex"
+            aria-hidden
+          >
+            <ChevronRight size={12} className={hasThread ? "text-brand" : "text-faint/60"} />
+          </motion.span>
+          <span>{index + 1}</span>
+        </span>
+      </td>
       <td className={`${td} font-medium text-ink`}>
         <div className="flex items-center gap-2">
           {v.contact?.url ? (
@@ -165,6 +204,7 @@ function VendorRow({ id, index }: { id: string; index: number }) {
               href={v.contact.url}
               target="_blank"
               rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
               className="truncate hover:text-brand hover:underline"
               title={v.contact.url}
             >
@@ -208,10 +248,51 @@ function VendorRow({ id, index }: { id: string; index: number }) {
         <StatusPill status={v.status} />
       </td>
       <td className={`${td} max-w-[240px] text-xs text-muted`}>
-        <span className="line-clamp-2">{v.note ?? ""}</span>
+        <div className="flex flex-col gap-1">
+          <span className="line-clamp-2">{v.note ?? ""}</span>
+          {hasThread && (
+            <div className="flex items-center gap-1.5">
+              {emailCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-hover px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                  <Mail size={10} strokeWidth={2.2} />
+                  <span className="tnum">{emailCount}</span>
+                </span>
+              )}
+              {transcriptCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-hover px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                  <MessageSquare size={10} strokeWidth={2.2} />
+                  <span className="tnum">{transcriptCount}</span>
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       </td>
-      <td className={`${td} text-right`}>
+      <td className={`${td} text-right`} onClick={(e) => e.stopPropagation()}>
         <RowOrderButton vendorId={v.id} />
+      </td>
+    </motion.tr>
+  );
+}
+
+/** Renders right under a VendorRow when the user expands it — emails + transcript. */
+function VendorRowExpansion({
+  vendorId,
+  colSpan,
+}: {
+  vendorId: string;
+  colSpan: number;
+}) {
+  return (
+    <motion.tr
+      layout
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.18 }}
+    >
+      <td colSpan={colSpan} className="border-b border-border bg-app/40 p-0">
+        <VendorThread vendorId={vendorId} />
       </td>
     </motion.tr>
   );
@@ -226,6 +307,8 @@ export default function MasterTable() {
   const hasVendors = vendorOrder.length > 0;
   const showWarmup = running && !hasVendors;
   const stillDiscovering = running && hasVendors;
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const toggle = (id: string) => setExpanded((cur) => (cur === id ? null : id));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-[var(--shadow-card)]">
@@ -284,9 +367,27 @@ export default function MasterTable() {
             </thead>
             <tbody>
               <AnimatePresence initial={false}>
-                {vendorOrder.map((id, i) => (
-                  <VendorRow key={id} id={id} index={i} />
-                ))}
+                {vendorOrder.flatMap((id, i) => {
+                  const rows = [
+                    <VendorRow
+                      key={id}
+                      id={id}
+                      index={i}
+                      expanded={expanded === id}
+                      onToggle={toggle}
+                    />,
+                  ];
+                  if (expanded === id) {
+                    rows.push(
+                      <VendorRowExpansion
+                        key={`${id}:expand`}
+                        vendorId={id}
+                        colSpan={COLS.length}
+                      />,
+                    );
+                  }
+                  return rows;
+                })}
               </AnimatePresence>
 
               {vendorOrder.length === 0 && (

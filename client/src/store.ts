@@ -87,6 +87,25 @@ export interface ChatMessage {
   question?: ChatQuestion;
 }
 
+/** A single email captured for a vendor's RFQ thread. */
+export interface VendorEmail {
+  id: number;
+  direction: "out" | "in";
+  to?: string;
+  from?: string;
+  subject?: string;
+  body?: string;
+  unitPrice?: number;
+  leadTimeDays?: number;
+  at: number;
+}
+
+/** Per-vendor archive of every email + every call transcript line we've seen. */
+export interface VendorThread {
+  emails: VendorEmail[];
+  transcript: TranscriptLine[];
+}
+
 /** All per-run state in one bag — what an RFQ pipeline carries from start to finish. */
 export interface RunData {
   runId: string;
@@ -104,6 +123,7 @@ export interface RunData {
   subagentOrder: string[];
   vendors: Record<string, Vendor>;
   vendorOrder: string[];
+  vendorThreads: Record<string, VendorThread>;
   summary?: Summary;
   call: CallState;
   chat: ChatMessage[];
@@ -126,9 +146,36 @@ function newRunData(runId: string, title = "New RFQ"): RunData {
     subagentOrder: [],
     vendors: {},
     vendorOrder: [],
+    vendorThreads: {},
     call: { ...initialCall, transcript: [] },
     chat: [],
     question: null,
+  };
+}
+
+function pushEmail(r: RunData, vendorId: string, email: VendorEmail): RunData {
+  const prev = r.vendorThreads[vendorId] ?? { emails: [], transcript: [] };
+  return {
+    ...r,
+    vendorThreads: {
+      ...r.vendorThreads,
+      [vendorId]: { ...prev, emails: [...prev.emails, email] },
+    },
+  };
+}
+
+function pushTranscript(
+  r: RunData,
+  vendorId: string,
+  line: TranscriptLine,
+): RunData {
+  const prev = r.vendorThreads[vendorId] ?? { emails: [], transcript: [] };
+  return {
+    ...r,
+    vendorThreads: {
+      ...r.vendorThreads,
+      [vendorId]: { ...prev, transcript: [...prev.transcript, line] },
+    },
   };
 }
 
@@ -153,6 +200,7 @@ interface AppState {
   subagentOrder: string[];
   vendors: Record<string, Vendor>;
   vendorOrder: string[];
+  vendorThreads: Record<string, VendorThread>;
   summary?: Summary;
   call: CallState;
   chat: ChatMessage[];
@@ -193,6 +241,7 @@ function mirrorOf(r: RunData): Pick<
   | "subagentOrder"
   | "vendors"
   | "vendorOrder"
+  | "vendorThreads"
   | "summary"
   | "call"
   | "chat"
@@ -212,6 +261,7 @@ function mirrorOf(r: RunData): Pick<
     subagentOrder: r.subagentOrder,
     vendors: r.vendors,
     vendorOrder: r.vendorOrder,
+    vendorThreads: r.vendorThreads,
     summary: r.summary,
     call: r.call,
     chat: r.chat,
@@ -305,18 +355,25 @@ function applyOne(r: RunData, e: WireEvent): RunData {
     }
     case "call.connected":
       return { ...r, call: { ...r.call, active: true, phase: "connected" } };
-    case "call.transcript":
-      return {
+    case "call.transcript": {
+      const line: TranscriptLine = {
+        id: nextSeq(),
+        speaker: e.speaker,
+        text: e.text,
+        final: e.final,
+      };
+      const withCall = {
         ...r,
         call: {
           ...r.call,
           speaking: e.speaker,
-          transcript: [
-            ...r.call.transcript,
-            { id: nextSeq(), speaker: e.speaker, text: e.text, final: e.final },
-          ],
+          transcript: [...r.call.transcript, line],
         },
       };
+      // Also archive the line on the vendor thread so it survives past the
+      // current call and renders in the supplier-row expander after hang-up.
+      return pushTranscript(withCall, e.vendorId, line);
+    }
     case "call.quote": {
       const call = {
         ...r.call,
@@ -343,31 +400,54 @@ function applyOne(r: RunData, e: WireEvent): RunData {
       return { ...r, call: { ...r.call, phase: "ended", active: false, outcome: e.outcome, speaking: undefined } };
     case "email.sent": {
       const prev = r.vendors[e.vendorId];
-      if (!prev) return r;
-      return {
-        ...r,
-        vendors: {
-          ...r.vendors,
-          [e.vendorId]: { ...prev, status: prev.status === "discovered" ? "emailing" : prev.status },
-        },
-      };
+      const withVendor = prev
+        ? {
+            ...r,
+            vendors: {
+              ...r.vendors,
+              [e.vendorId]: {
+                ...prev,
+                status: prev.status === "discovered" ? ("emailing" as const) : prev.status,
+              },
+            },
+          }
+        : r;
+      return pushEmail(withVendor, e.vendorId, {
+        id: nextSeq(),
+        direction: "out",
+        to: e.to,
+        subject: e.subject,
+        body: e.body,
+        at: e.at ?? Date.now(),
+      });
     }
     case "email.reply": {
       const prev = r.vendors[e.vendorId];
-      if (!prev) return r;
-      return {
-        ...r,
-        vendors: {
-          ...r.vendors,
-          [e.vendorId]: {
-            ...prev,
-            status: "quoted",
-            initialPrice: e.unitPrice ?? prev.initialPrice,
-            negotiatedPrice: prev.negotiatedPrice ?? e.unitPrice,
-            leadTimeDays: e.leadTimeDays ?? prev.leadTimeDays,
-          },
-        },
-      };
+      const withVendor = prev
+        ? {
+            ...r,
+            vendors: {
+              ...r.vendors,
+              [e.vendorId]: {
+                ...prev,
+                status: "quoted" as const,
+                initialPrice: e.unitPrice ?? prev.initialPrice,
+                negotiatedPrice: prev.negotiatedPrice ?? e.unitPrice,
+                leadTimeDays: e.leadTimeDays ?? prev.leadTimeDays,
+              },
+            },
+          }
+        : r;
+      return pushEmail(withVendor, e.vendorId, {
+        id: nextSeq(),
+        direction: "in",
+        from: e.from,
+        subject: e.subject,
+        body: e.body,
+        unitPrice: e.unitPrice,
+        leadTimeDays: e.leadTimeDays,
+        at: e.at ?? Date.now(),
+      });
     }
     case "question.ask":
       return { ...r, question: { id: e.id, questions: e.questions } };
